@@ -148,6 +148,26 @@ fn main() {
     println!("slept enough: {}", start.elapsed() >= Duration::from_millis(30));
     println!("parallelism > 0: {}", thread::available_parallelism().unwrap().get() > 0);
 
+    // JoinHandleExt: a stable id per thread, distinct between live threads
+    {
+        use std::os::unix::thread::JoinHandleExt;
+        let stop = Arc::new(Barrier::new(3));
+        let spawn = || {
+            let s = stop.clone();
+            thread::spawn(move || {
+                s.wait();
+            })
+        };
+        let (a, b) = (spawn(), spawn());
+        let ida = a.as_pthread_t();
+        let idb = b.as_pthread_t();
+        let stable = a.as_pthread_t() == ida && ida != 0;
+        let into = b.into_pthread_t();
+        stop.wait();
+        a.join().unwrap();
+        println!("pthread ids: stable={stable} distinct={} into={}", ida != idb, into == idb);
+    }
+
     // thread stacks are unmapped after join and by detached threads themselves
     let maps = || std::fs::read_to_string("/proc/self/maps").unwrap().lines().count();
     let before = maps();

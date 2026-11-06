@@ -102,6 +102,7 @@ pub mod nr {
     pub const FCHMODAT2: usize = 452;
     pub const CHROOT: usize = 51;
     pub const MKNODAT: usize = 33;
+    pub const RT_SIGRETURN: usize = 139;
     pub const DUP: usize = 23;
 }
 
@@ -208,4 +209,19 @@ pub struct KSigaction {
     pub flags: usize,
     pub restorer: usize,
     pub mask: u64,
+}
+
+/// The `sa_restorer` of a signal handler: return from it through
+/// `rt_sigreturn`, as libc's `__restore_rt` does.
+///
+/// # Safety
+/// Only the kernel may call this, as a handler's return address.
+#[unsafe(naked)]
+pub unsafe extern "C" fn restore_rt() -> ! {
+    naked_asm!(
+        "mov x8, #{nr}",
+        "svc 0",
+        "brk #1",
+        nr = const nr::RT_SIGRETURN,
+    )
 }

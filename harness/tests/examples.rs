@@ -1,11 +1,26 @@
 //! Build each example (plain std programs, apps/examples) for linux-none and
 //! check what it prints: x86_64 natively, aarch64 natively or under qemu.
 
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use harness::*;
 
-const EXAMPLES: &[&str] = &["hello", "args-env", "fs", "threads", "process", "net", "collections", "panic", "stdin", "smoke"];
+const EXAMPLES: &[&str] = &[
+    "hello",
+    "args-env",
+    "fs",
+    "threads",
+    "process",
+    "net",
+    "collections",
+    "panic",
+    "stdin",
+    "smoke",
+    "parallelism",
+    "stack-overflow",
+];
 
 struct Env {
     dir: PathBuf,
@@ -88,6 +103,7 @@ fn check_threads(e: &Env) {
         "parked and unparked",
         "slept enough: true",
         "parallelism > 0: true",
+        "pthread ids: stable=true distinct=true into=true",
         "no stack leak: true",
     ] {
         has(&out, line);
@@ -148,6 +164,57 @@ fn check_stdin(e: &Env) {
     has(&r.stderr(), "Error: \"bad number \\\"nope\\\"");
 }
 
+fn check_stack_overflow(e: &Env) {
+    const SIGABRT: i32 = 6;
+    const SIGSEGV: i32 = 11;
+    for (how, name) in [("main", "main"), ("thread", "deep")] {
+        let r = e.run("stack-overflow", &[how], b"", &[]);
+        let err = r.stderr();
+        assert_eq!(r.output.status.signal(), Some(SIGABRT), "{how}: {:?}\n{err}", r.output.status);
+        has(&err, &format!("\nthread '{name}' ("));
+        has(&err, ") has overflowed its stack\nfatal runtime error: stack overflow");
+    }
+    // other faults, and SIGSEGV sent with kill, keep their default action
+    for how in ["segv", "kill"] {
+        let r = e.run("stack-overflow", &[how], b"", &[]);
+        let err = r.stderr();
+        assert_eq!(r.output.status.signal(), Some(SIGSEGV), "{how}: {:?}\n{err}", r.output.status);
+        assert!(!err.contains("overflowed") && !err.contains("still alive"), "{how}: {err}");
+    }
+}
+
+fn check_parallelism(e: &Env) {
+    // the harness and the example share a cgroup, so host std must agree
+    let host = std::thread::available_parallelism().unwrap().get();
+    let r = e.run("parallelism", &[], b"", &[]);
+    assert_eq!(r.code(), Some(0), "{}", r.stderr());
+    assert_eq!(r.stdout().trim().parse::<usize>().unwrap(), host);
+
+    // under a CPU quota of two cores, in a transient systemd unit
+    let quota = |cmd: &[&Path]| {
+        Command::new("systemd-run")
+            .args(["--user", "--quiet", "--wait", "--pipe", "--collect", "-p", "CPUQuota=200%"])
+            .args(cmd)
+            .stdin(std::process::Stdio::null())
+            .output()
+    };
+    if !quota(&[Path::new("true")]).is_ok_and(|o| o.status.success()) {
+        eprintln!("skipping the cgroup quota check: systemd-run --user -p CPUQuota is not available");
+        return;
+    }
+    let exe = e.dir.join("parallelism");
+    let mut cmd: Vec<&Path> = e.runner.iter().map(|r| r.as_path()).collect();
+    cmd.push(&exe);
+    let o = quota(&cmd).unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let n: usize = String::from_utf8_lossy(&o.stdout).trim().parse().unwrap();
+    if host >= 2 {
+        assert_eq!(n, 2, "available_parallelism under CPUQuota=200%");
+    } else {
+        assert!(n <= 2, "available_parallelism under CPUQuota=200%: {n}");
+    }
+}
+
 fn check_all(e: &Env, tag: &str) {
     check_hello(e);
     check_args_env(e);
@@ -158,6 +225,8 @@ fn check_all(e: &Env, tag: &str) {
     check_collections(e);
     check_panic(e);
     check_stdin(e);
+    check_stack_overflow(e);
+    check_parallelism(e);
 }
 
 fn check_smoke(e: &Env) {

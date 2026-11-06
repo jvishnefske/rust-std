@@ -143,13 +143,31 @@ pub unsafe fn init_area(area: *mut u8) -> usize {
         let tcb = tp as *mut usize;
         if cfg!(target_arch = "x86_64") {
             *tcb = tp;
-            *tcb.add(1) = 0;
         } else {
             *tcb = 0;
-            *tcb.add(1) = 0;
         }
+        *tcb.add(THREAD_WORD) = 0;
         tp
     }
+}
+
+/// The TCB word (after x86_64's self-pointer, the second of aarch64's
+/// reserved pair) where [`crate::thread`] keeps the thread's control block:
+/// 0 on the main thread.
+const THREAD_WORD: usize = 1;
+
+/// Set the [`THREAD_WORD`] of the TCB at `tp`, as returned by [`init_area`].
+///
+/// # Safety
+/// `tp` must be a thread pointer from [`init_area`].
+pub(crate) unsafe fn set_thread_word(tp: usize, v: usize) {
+    unsafe { *(tp as *mut usize).add(THREAD_WORD) = v };
+}
+
+/// The calling thread's [`THREAD_WORD`] (async-signal-safe).
+#[cfg(linux_none)]
+pub(crate) fn thread_word() -> usize {
+    unsafe { *(crate::arch::thread_pointer() as *const usize).add(THREAD_WORD) }
 }
 
 /// Record the TLS image and give the main thread its TLS.

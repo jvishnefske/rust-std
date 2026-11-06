@@ -31,9 +31,10 @@ small runtime crate instead of libc.
   (variant II on x86_64, variant I on aarch64), threads on `clone` with
   `CLONE_CHILD_CLEARTID` join, process spawning (`clone(CLONE_VM|CLONE_VFORK)`
   + `execve`, or a full fork for `pre_exec` callbacks), an mmap size-class
-  allocator, futexes and `getdents64` parsing. Kani proofs cover the
-  allocator's size classes, the TLS layout, syscall error decoding and the
-  dirent parser.
+  allocator, futexes, `getdents64` parsing, and the alternate signal stacks
+  and guard-page lookup behind std's stack overflow message. Kani proofs
+  cover the allocator's size classes, the TLS layout, syscall error
+  decoding, the dirent parser and the `/proc/self/maps` parser.
 - **`std-patches/`**: a patch series against `library/` of the pinned
   nightly's `rust-src`. It adds `cfg(linux_none)` (linux with an empty
   `target_env`), a `linux_none` arm ahead of the `unix` one in each `sys`
@@ -91,12 +92,10 @@ that its builds are rebuilt.
 - **`fs::canonicalize`** asks `/proc/self/fd`, so it needs `/proc`.
 - **`io::copy`** copies through a buffer: there is no
   `copy_file_range`/`sendfile`/`splice` fast path yet.
-- **`thread::available_parallelism`** counts the affinity mask and ignores
-  cgroup CPU quotas.
-- **`os::unix::thread::JoinHandleExt`** is not implemented, since there are
-  no pthreads to hand out.
-- **Stack overflows** are a plain SIGSEGV on the guard page, without std's
-  "has overflowed its stack" message.
+- **`os::unix::thread::JoinHandleExt`** hands out the address of the
+  runtime's control block for the thread as its `pthread_t` (there are no
+  pthreads). `into_pthread_t` detaches the thread, since nothing could join
+  it through that value.
 
 ## Testing
 
@@ -105,7 +104,10 @@ patched sources if needed, then for x86_64 and for aarch64:
 
 - **Examples**: it builds `apps/examples` and checks what each program
   prints, and that every binary is a static ELF with no `PT_INTERP`,
-  `PT_DYNAMIC` or undefined symbol.
+  `PT_DYNAMIC` or undefined symbol. That includes overflowing the stack of
+  the main and of a spawned thread (std's message, then SIGABRT), and
+  `available_parallelism` under a two-core quota from
+  `systemd-run --user -p CPUQuota=200%` (skipped without it).
 - **std's own tests**: it runs upstream `library/std/tests` (the
   `apps/stdtests` crate) under libtest with `-Zpanic-abort-tests`, so every
   test runs in a child process. Skipped are the ten sync tests that need

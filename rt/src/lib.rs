@@ -8,6 +8,8 @@
 //! - [`tls`]: ELF thread-local storage from the `PT_TLS` image.
 //! - [`thread`]: threads on `clone`, joined through `CLONE_CHILD_CLEARTID`.
 //! - [`process`]: child processes on `clone` + `execve`.
+//! - [`signal`]: signal handlers on alternate stacks, for std's stack
+//!   overflow message.
 //! - [`alloc`]: an mmap-backed size-class allocator.
 //! - [`futex`], [`locks`]: futex wait/wake and the locks built on them.
 //! - [`dirent`]: parsing `getdents64` buffers.
@@ -35,6 +37,7 @@ pub mod dirent;
 pub mod futex;
 pub mod locks;
 pub mod process;
+pub mod signal;
 pub mod start;
 pub mod sys;
 pub mod thread;

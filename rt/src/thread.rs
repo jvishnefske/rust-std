@@ -1,17 +1,22 @@
 //! Native threads created with `clone(2)`.
 //!
 //! One anonymous mapping per thread holds, from the bottom: a guard page, the
-//! stack, the thread's TLS area and its [`Control`] block. The kernel clears
+//! stack, the thread's TLS area and its [`Control`] block. Once
+//! [`signal::enable_altstacks`] has been called, an alternate signal stack
+//! with its own guard page goes below all that. The kernel clears
 //! `Control::tid` and wakes it as a futex when the thread exits
 //! (`CLONE_CHILD_CLEARTID`), which is what [`Thread::join`] waits for. A
 //! detached thread unmaps its own mapping on the way out.
+//!
+//! The TLS area's TCB points back at the [`Control`] block, so a thread can
+//! find its own guard page ([`current_guard`]), even in a signal handler.
 
 use core::mem::size_of;
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::Ordering::{AcqRel, Acquire};
 
 use crate::sys::{self, PAGE_SIZE};
-use crate::{arch, futex, tls};
+use crate::{arch, futex, signal, tls};
 
 const RUNNING: u32 = 0;
 const DETACHED: u32 = 1;
@@ -26,6 +31,10 @@ struct Control {
     state: AtomicU32,
     map_base: usize,
     map_len: usize,
+    /// the stack's guard page
+    guard: usize,
+    /// alternate signal stack size (0: none), at `map_base + PAGE_SIZE`
+    altstack: usize,
     entry: unsafe fn(*mut u8),
     arg: *mut u8,
 }
@@ -52,7 +61,9 @@ pub unsafe fn spawn(stack_size: usize, entry: unsafe fn(*mut u8), arg: *mut u8) 
     let stack_size = round_up(stack_size.max(MIN_STACK), PAGE_SIZE);
     let tls_len = tls::Layout::new(&tls::image()).reserve();
     let top_len = round_up(tls_len + size_of::<Control>() + 64, PAGE_SIZE);
-    let map_len = PAGE_SIZE + stack_size + top_len;
+    let altstack = signal::thread_altstack_size();
+    let alt_len = if altstack > 0 { PAGE_SIZE + altstack } else { 0 };
+    let map_len = alt_len + PAGE_SIZE + stack_size + top_len;
     let base = unsafe {
         sys::mmap(
             0,
@@ -63,22 +74,30 @@ pub unsafe fn spawn(stack_size: usize, entry: unsafe fn(*mut u8), arg: *mut u8) 
             0,
         )?
     };
-    // guard page below the stack
-    let _ = unsafe { sys::mprotect(base, PAGE_SIZE, sys::PROT_NONE) };
+    // guard pages below the stack and the alternate signal stack
+    let guard = base + alt_len;
+    let _ = unsafe { sys::mprotect(guard, PAGE_SIZE, sys::PROT_NONE) };
+    if altstack > 0 {
+        let _ = unsafe { sys::mprotect(base, PAGE_SIZE, sys::PROT_NONE) };
+    }
 
     let ctl_addr = (base + map_len - size_of::<Control>()) & !63;
     let ctl = ctl_addr as *mut Control;
-    let top = base + PAGE_SIZE + stack_size;
+    let top = guard + PAGE_SIZE + stack_size;
     let tp = unsafe {
         ctl.write(Control {
             tid: AtomicU32::new(0),
             state: AtomicU32::new(RUNNING),
             map_base: base,
             map_len,
+            guard,
+            altstack,
             entry,
             arg,
         });
-        tls::init_area(top as *mut u8)
+        let tp = tls::init_area(top as *mut u8);
+        tls::set_thread_word(tp, ctl_addr);
+        tp
     };
 
     // the trampoline pops `thread_start` then `ctl` off the new stack
@@ -109,7 +128,13 @@ pub unsafe fn spawn(stack_size: usize, entry: unsafe fn(*mut u8), arg: *mut u8) 
 extern "C" fn thread_start(arg: *mut u8) -> ! {
     let ctl = arg as *mut Control;
     unsafe {
+        if (*ctl).altstack > 0 {
+            let _ = signal::set_altstack((*ctl).map_base + PAGE_SIZE, (*ctl).altstack);
+        }
         ((*ctl).entry)((*ctl).arg);
+        if (*ctl).altstack > 0 {
+            signal::disable_altstack();
+        }
         let (base, len) = ((*ctl).map_base, (*ctl).map_len);
         if (*ctl).state.swap(FINISHED, AcqRel) == DETACHED {
             // Nobody will join us: free our own mapping on the way out. Our
@@ -123,7 +148,25 @@ extern "C" fn thread_start(arg: *mut u8) -> ! {
     }
 }
 
+/// The calling thread's stack guard page, as `(start, end)`; None on the
+/// main thread, whose stack the kernel manages. Async-signal-safe.
+#[cfg(linux_none)]
+pub fn current_guard() -> Option<(usize, usize)> {
+    let ctl = tls::thread_word() as *const Control;
+    if ctl.is_null() {
+        return None;
+    }
+    let guard = unsafe { (*ctl).guard };
+    Some((guard, guard + PAGE_SIZE))
+}
+
 impl Thread {
+    /// The address of the thread's control block: an id that is unique
+    /// among live threads and does not change.
+    pub fn as_raw(&self) -> usize {
+        self.ctl as usize
+    }
+
     /// The kernel thread id (0 once the thread has exited).
     pub fn tid(&self) -> u32 {
         unsafe { (*self.ctl).tid.load(Acquire) }

@@ -150,6 +150,10 @@ pub const SIG_IGN: usize = 1;
 pub const SIG_DFL: usize = 0;
 pub const SIG_UNBLOCK: usize = 1;
 pub const SIG_SETMASK: usize = 2;
+pub const SA_SIGINFO: usize = 4;
+pub const SA_ONSTACK: usize = 0x0800_0000;
+pub const SA_RESTORER: usize = 0x0400_0000;
+pub const SS_DISABLE: i32 = 2;
 
 // ---- clone ----
 pub const CLONE_VM: usize = 0x100;
@@ -404,6 +408,16 @@ pub fn tgkill(pid: u32, tid: u32, sig: usize) -> SysResult {
 }
 pub unsafe fn rt_sigaction(sig: usize, act: *const crate::arch::KSigaction, old: *mut crate::arch::KSigaction) -> SysResult {
     unsafe { sc!(nr::RT_SIGACTION, sig, act, old, 8) }
+}
+/// `stack_t`, for [`sigaltstack`].
+#[repr(C)]
+pub struct StackT {
+    pub sp: usize,
+    pub flags: i32,
+    pub size: usize,
+}
+pub unsafe fn sigaltstack(new: *const StackT, old: *mut StackT) -> SysResult {
+    unsafe { sc!(nr::SIGALTSTACK, new, old) }
 }
 pub unsafe fn rt_sigprocmask(how: usize, set: *const u64, old: *mut u64) -> SysResult {
     unsafe { sc!(nr::RT_SIGPROCMASK, how, set, old, 8) }

@@ -1,53 +1,164 @@
-//! Helpers for building and running rust_std binaries (the examples and the
-//! `stdtests` suite) from ordinary std-based tests. See `tests/`.
+//! Helpers for building the programs in `apps/` with std for
+//! `*-unknown-linux-none` and running them, from ordinary host tests (see
+//! `tests/`).
+//!
+//! Builds use the pinned nightly with `__CARGO_TESTS_ONLY_SRC_ROOT` pointing
+//! at the patched `library/` (rather than the `linux-none` toolchain), and
+//! carry a hash of the std and rt sources in their rustflags: cargo does not
+//! notice edits to `-Zbuild-std` crates on its own.
 
 pub mod fuzz;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
 
-pub const AARCH64: &str = "aarch64-unknown-linux-gnu";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arch {
+    X86_64,
+    Aarch64,
+}
 
-fn workspace_root() -> PathBuf {
+impl Arch {
+    /// The `--target` argument: the built-in triple, or our JSON spec.
+    fn target_arg(self) -> String {
+        match self {
+            Arch::X86_64 => "x86_64-unknown-linux-none".into(),
+            Arch::Aarch64 => repo().join("targets/aarch64-unknown-linux-none.json").display().to_string(),
+        }
+    }
+
+    /// The target's name (output directory, `[target.<name>]` config key).
+    pub fn name(self) -> &'static str {
+        match self {
+            Arch::X86_64 => "x86_64-unknown-linux-none",
+            Arch::Aarch64 => "aarch64-unknown-linux-none",
+        }
+    }
+
+    pub fn machine(self) -> u16 {
+        match self {
+            Arch::X86_64 => EM_X86_64,
+            Arch::Aarch64 => EM_AARCH64,
+        }
+    }
+
+    /// The runner for this arch's binaries: none when it matches the host,
+    /// else qemu if available (`None` means they cannot run here).
+    pub fn runner(self) -> Option<Option<PathBuf>> {
+        let native = matches!((self, std::env::consts::ARCH), (Arch::X86_64, "x86_64") | (Arch::Aarch64, "aarch64"));
+        if native {
+            return Some(None);
+        }
+        match self {
+            Arch::Aarch64 => qemu_aarch64().map(Some),
+            Arch::X86_64 => None,
+        }
+    }
+}
+
+pub fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
-/// `cargo build --release <args> [--target T]` in the workspace; returns the
-/// release output directory.
-fn cargo_build(args: &[&str], target: Option<&str>) -> PathBuf {
-    let root = workspace_root();
-    let mut cmd = Command::new(env!("CARGO"));
-    cmd.current_dir(&root).args(["build", "--release"]).args(args);
-    if let Some(t) = target {
-        cmd.args(["--target", t]);
+fn apps() -> PathBuf {
+    repo().join("apps")
+}
+
+/// The toolchain pinned in `rust-toolchain.toml`.
+fn pinned_toolchain() -> String {
+    let s = std::fs::read_to_string(repo().join("rust-toolchain.toml")).unwrap();
+    s.lines()
+        .find_map(|l| l.trim().strip_prefix("channel = \""))
+        .and_then(|l| l.strip_suffix('"'))
+        .expect("no channel in rust-toolchain.toml")
+        .to_string()
+}
+
+/// A hash of the path, size and mtime of every source file std is built from.
+fn sources_stamp() -> String {
+    fn walk(p: &Path, h: &mut u64) {
+        let Ok(md) = std::fs::metadata(p) else { return };
+        if md.is_dir() {
+            let mut entries: Vec<_> = std::fs::read_dir(p).unwrap().map(|e| e.unwrap().path()).collect();
+            entries.sort();
+            for e in entries {
+                walk(&e, h);
+            }
+            return;
+        }
+        let mtime = md.modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        for b in p.as_os_str().as_encoded_bytes().iter().chain(&md.len().to_le_bytes()).chain(&mtime.to_le_bytes()) {
+            *h = (*h ^ *b as u64).wrapping_mul(0x100000001b3);
+        }
     }
-    let status = cmd.status().expect("failed to run cargo");
-    assert!(status.success(), "cargo build {args:?} failed for {target:?}");
-    let mut dir = root.join("target");
-    if let Some(t) = target {
-        dir.push(t);
+    let mut h: u64 = 0xcbf29ce484222325;
+    let lib = xtask::library_dir();
+    for p in [lib.join("Cargo.toml"), lib.join("std"), lib.join("../libc/src"), repo().join("rt")] {
+        if p.ends_with("rt") {
+            for f in ["Cargo.toml", "build.rs", "src"] {
+                walk(&p.join(f), &mut h);
+            }
+        } else {
+            walk(&p, &mut h);
+        }
     }
-    dir.join("release")
+    format!("{h:016x}")
 }
 
-/// Build all examples for `target` (None = host) once per test process and
-/// return the directory holding them.
-pub fn examples_dir(target: Option<&str>) -> PathBuf {
-    static HOST: OnceLock<PathBuf> = OnceLock::new();
-    static CROSS: OnceLock<PathBuf> = OnceLock::new();
-    let cell = if target.is_some() { &CROSS } else { &HOST };
-    cell.get_or_init(|| cargo_build(&["--examples", "-p", "rust_std"], target).join("examples")).clone()
+/// Build the patched std tree if needed, once per test process.
+fn prepare() -> &'static str {
+    static STAMP: OnceLock<String> = OnceLock::new();
+    STAMP.get_or_init(|| {
+        xtask::ensure_sysroot().expect("cargo xtask sysroot failed");
+        sources_stamp()
+    })
 }
 
-/// Build the `fuzzee` binary (the rust_std side of the fuzzer) for `target`.
-pub fn fuzzee_bin(target: Option<&str>) -> PathBuf {
-    cargo_build(&["-p", "fuzzee"], target).join("fuzzee")
+/// `cargo <args>` in `apps/` for `arch`, building std from the patched tree.
+pub fn apps_cargo(arch: Arch, args: &[&str]) -> Command {
+    let stamp = prepare();
+    let mut cmd = Command::new("cargo");
+    cmd.arg(format!("+{}", pinned_toolchain()))
+        .args(args)
+        .current_dir(apps())
+        .env("__CARGO_TESTS_ONLY_SRC_ROOT", xtask::library_dir())
+        .args(["--target", &arch.target_arg()])
+        .arg("-Zbuild-std=std,panic_abort,test")
+        .arg("--config")
+        .arg(format!(
+            "target.{}.rustflags=[\"--cfg=linux_none_src=\\\"{stamp}\\\"\", \"--check-cfg=cfg(linux_none_src, values(any()))\"]",
+            arch.name()
+        ));
+    if let Some(Some(r)) = arch.runner() {
+        cmd.arg("--config").arg(format!("target.{}.runner=[\"{}\"]", arch.name(), r.display()));
+    }
+    cmd
 }
 
-/// Build the `stdtests` binary (std's own tests on rust_std) for `target`.
-pub fn stdtests_bin(target: Option<&str>) -> PathBuf {
-    cargo_build(&["-p", "stdtests"], target).join("stdtests")
+/// One cargo build in `apps/` at a time: concurrent ones only wait for the
+/// build directory lock (and print about it).
+static BUILD: Mutex<()> = Mutex::new(());
+
+/// `cargo build <args>` for `arch`; returns the debug output directory.
+fn build(arch: Arch, args: &[&str]) -> PathBuf {
+    let _g = BUILD.lock().unwrap_or_else(|e| e.into_inner());
+    let status = apps_cargo(arch, &[&["build"], args].concat()).status().expect("failed to run cargo");
+    assert!(status.success(), "cargo build {args:?} failed for {arch:?}");
+    apps().join("target").join(arch.name()).join("debug")
+}
+
+/// Build the example programs for `arch` once per test process and return the
+/// directory holding them.
+pub fn examples_dir(arch: Arch) -> PathBuf {
+    static DIRS: [OnceLock<PathBuf>; 2] = [OnceLock::new(), OnceLock::new()];
+    DIRS[arch as usize].get_or_init(|| build(arch, &["-p", "examples"])).clone()
+}
+
+/// Build the `fuzzee` binary (the linux-none side of the fuzzer) for `arch`.
+pub fn fuzzee_bin(arch: Arch) -> PathBuf {
+    build(arch, &["-p", "fuzzee"]).join("fuzzee")
 }
 
 /// A qemu user-mode emulator for aarch64: `$QEMU_AARCH64`, or `qemu-aarch64`
@@ -58,16 +169,6 @@ pub fn qemu_aarch64() -> Option<PathBuf> {
     }
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|d| d.join("qemu-aarch64")).find(|p| p.is_file())
-}
-
-/// Whether the aarch64 target's standard library is installed.
-pub fn aarch64_target_installed() -> bool {
-    Command::new("rustc")
-        .args(["--print", "target-libdir", "--target", AARCH64])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .is_some_and(|dir| Path::new(dir.trim()).is_dir())
 }
 
 pub struct Run {
@@ -86,7 +187,7 @@ impl Run {
     }
 }
 
-/// Run an example binary, natively or through `runner` (e.g. qemu).
+/// Run a binary from `dir`, natively or through `runner` (e.g. qemu).
 pub fn run(dir: &Path, runner: Option<&Path>, name: &str, args: &[&str], stdin: &[u8], env: &[(&str, &str)]) -> Run {
     use std::io::Write;
     let exe = dir.join(name);
@@ -104,51 +205,8 @@ pub fn run(dir: &Path, runner: Option<&Path>, name: &str, args: &[&str], stdin: 
     Run { output: child.wait_with_output().unwrap() }
 }
 
-/// Run `exe args...` (through `runner` if given) with core dumps disabled,
-/// killing it after `timeout`. Returns None on timeout.
-pub fn run_timeout(exe: &Path, runner: Option<&Path>, args: &[&str], cwd: &Path, timeout: std::time::Duration) -> Option<Run> {
-    use std::io::Read;
-    // core dumps are off unless STDTESTS_CORE_DIR asks for them (debugging)
-    let core_dir = std::env::var_os("STDTESTS_CORE_DIR").map(PathBuf::from);
-    let ulimit = if core_dir.is_some() { "ulimit -c unlimited" } else { "ulimit -c 0" };
-    let mut cmd = Command::new("sh");
-    cmd.args(["-c", &format!("{ulimit}; exec \"$@\""), "sh"]);
-    if let Some(r) = runner {
-        cmd.arg(r);
-    }
-    cmd.arg(exe).args(args).current_dir(core_dir.as_deref().unwrap_or(cwd));
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().unwrap_or_else(|e| panic!("failed to start {}: {e}", exe.display()));
-    let mut out = child.stdout.take().unwrap();
-    let mut err = child.stderr.take().unwrap();
-    let out_t = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = out.read_to_end(&mut v);
-        v
-    });
-    let err_t = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = err.read_to_end(&mut v);
-        v
-    });
-    let deadline = std::time::Instant::now() + timeout;
-    let status = loop {
-        if let Some(s) = child.try_wait().unwrap() {
-            break Some(s);
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            break None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    };
-    let (stdout, stderr) = (out_t.join().unwrap(), err_t.join().unwrap());
-    status.map(|status| Run { output: Output { status, stdout, stderr } })
-}
-
-/// ELF checks: statically linked (no PT_INTERP / PT_DYNAMIC), and the
-/// expected machine type.
+/// ELF checks: a static executable (ET_EXEC, no PT_INTERP / PT_DYNAMIC) for
+/// `machine`, with no undefined symbols: nothing is left for a libc.
 pub fn assert_static_elf(path: &Path, machine: u16) {
     let data = std::fs::read(path).unwrap();
     assert_eq!(&data[..4], b"\x7fELF", "{} is not ELF", path.display());
@@ -164,6 +222,28 @@ pub fn assert_static_elf(path: &Path, machine: u16) {
         assert_ne!(p_type, 3, "{} has PT_INTERP (needs a dynamic loader)", path.display());
         assert_ne!(p_type, 2, "{} has PT_DYNAMIC (dynamically linked)", path.display());
     }
+
+    // `nm -u`: symbols in .symtab with st_shndx == SHN_UNDEF
+    const SHT_SYMTAB: u32 = 2;
+    let (shoff, shentsize, shnum) = (u64_at(40) as usize, u16_at(58) as usize, u16_at(60) as usize);
+    let section = |i: usize| shoff + i * shentsize;
+    let mut undefined = Vec::new();
+    for i in 0..shnum {
+        let sh = section(i);
+        if u32_at(sh + 4) != SHT_SYMTAB {
+            continue;
+        }
+        let (off, size, entsize) = (u64_at(sh + 24) as usize, u64_at(sh + 32) as usize, u64_at(sh + 56) as usize);
+        let strtab = u64_at(section(u32_at(sh + 40) as usize) + 24) as usize;
+        for sym in (off..off + size).step_by(entsize).skip(1) {
+            let (name, shndx) = (u32_at(sym) as usize, u16_at(sym + 6));
+            if shndx == 0 && name != 0 {
+                let end = data[strtab + name..].iter().position(|&c| c == 0).unwrap();
+                undefined.push(String::from_utf8_lossy(&data[strtab + name..strtab + name + end]).into_owned());
+            }
+        }
+    }
+    assert!(undefined.is_empty(), "{} has undefined symbols: {undefined:?}", path.display());
 }
 
 pub const EM_X86_64: u16 = 62;

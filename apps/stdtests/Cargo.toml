@@ -1,0 +1,114 @@
+[package]
+name = "stdtests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "std's own integration tests (library/std/tests of the patched tree), built for linux-none"
+
+# switch-stdout.rs is left out: it calls libc's dup/dup2 itself.
+
+[lib]
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[dev-dependencies]
+rand = { version = "0.9.0", default-features = false, features = ["alloc"] }
+rand_xorshift = "0.4.0"
+
+[[test]]
+name = "ambiguous-hash_map"
+path = "../../target/linux-none/std-src/library/std/tests/ambiguous-hash_map.rs"
+
+[[test]]
+name = "builtin-clone"
+path = "../../target/linux-none/std-src/library/std/tests/builtin-clone.rs"
+
+[[test]]
+name = "create_dir_all_bare"
+path = "../../target/linux-none/std-src/library/std/tests/create_dir_all_bare.rs"
+
+[[test]]
+name = "env"
+path = "../../target/linux-none/std-src/library/std/tests/env.rs"
+
+[[test]]
+name = "env_modify"
+path = "../../target/linux-none/std-src/library/std/tests/env_modify.rs"
+
+[[test]]
+name = "eq-multidispatch"
+path = "../../target/linux-none/std-src/library/std/tests/eq-multidispatch.rs"
+
+[[test]]
+name = "error"
+path = "../../target/linux-none/std-src/library/std/tests/error.rs"
+
+[[test]]
+name = "istr"
+path = "../../target/linux-none/std-src/library/std/tests/istr.rs"
+
+[[test]]
+name = "log-knows-the-names-of-variants-in-std"
+path = "../../target/linux-none/std-src/library/std/tests/log-knows-the-names-of-variants-in-std.rs"
+
+[[test]]
+name = "minmax-stability-issue-23687"
+path = "../../target/linux-none/std-src/library/std/tests/minmax-stability-issue-23687.rs"
+
+[[test]]
+name = "num"
+path = "../../target/linux-none/std-src/library/std/tests/num.rs"
+
+[[test]]
+name = "panic"
+path = "../../target/linux-none/std-src/library/std/tests/panic.rs"
+
+[[test]]
+name = "path"
+path = "../../target/linux-none/std-src/library/std/tests/path.rs"
+
+[[test]]
+name = "process_spawning"
+path = "../../target/linux-none/std-src/library/std/tests/process_spawning.rs"
+
+[[test]]
+name = "run-time-detect"
+path = "../../target/linux-none/std-src/library/std/tests/run-time-detect.rs"
+
+[[test]]
+name = "seq-compare"
+path = "../../target/linux-none/std-src/library/std/tests/seq-compare.rs"
+
+[[test]]
+name = "slice-from-array-issue-113238"
+path = "../../target/linux-none/std-src/library/std/tests/slice-from-array-issue-113238.rs"
+
+[[test]]
+name = "thread"
+path = "../../target/linux-none/std-src/library/std/tests/thread.rs"
+
+[[test]]
+name = "time"
+path = "../../target/linux-none/std-src/library/std/tests/time.rs"
+
+[[test]]
+name = "type-name-unsized"
+path = "../../target/linux-none/std-src/library/std/tests/type-name-unsized.rs"
+
+[[test]]
+name = "volatile-fat-ptr"
+path = "../../target/linux-none/std-src/library/std/tests/volatile-fat-ptr.rs"
+
+[[test]]
+name = "pipe-subprocess"
+path = "../../target/linux-none/std-src/library/std/tests/pipe_subprocess.rs"
+harness = false
+
+[[test]]
+name = "sync"
+path = "../../target/linux-none/std-src/library/std/tests/sync/lib.rs"
+
+[[test]]
+name = "thread_local"
+path = "../../target/linux-none/std-src/library/std/tests/thread_local/lib.rs"

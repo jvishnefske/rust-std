@@ -14,7 +14,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(entry)]
+#[cfg(linux_none)]
 use crate::sys;
 
 const PT_TLS: u32 = 7;
@@ -53,7 +53,7 @@ pub fn image() -> Image {
 }
 
 /// `Elf64_Phdr`.
-#[cfg_attr(not(entry), allow(dead_code))]
+#[cfg_attr(not(linux_none), allow(dead_code))]
 #[repr(C)]
 struct Phdr {
     p_type: u32,
@@ -70,7 +70,7 @@ struct Phdr {
 ///
 /// # Safety
 /// `phdr` must point to `phnum` valid program headers.
-#[cfg_attr(not(entry), allow(dead_code))]
+#[cfg_attr(not(linux_none), allow(dead_code))]
 unsafe fn find_image(phdr: *const Phdr, phnum: usize) -> Image {
     for i in 0..phnum {
         let h = unsafe { &*phdr.add(i) };
@@ -153,7 +153,7 @@ pub unsafe fn init_area(area: *mut u8) -> usize {
 }
 
 /// Record the TLS image and give the main thread its TLS.
-#[cfg(entry)]
+#[cfg(linux_none)]
 pub(crate) unsafe fn init_main_thread() {
     use crate::start::{AT_PHDR, AT_PHNUM, auxv};
     let img = match (auxv(AT_PHDR), auxv(AT_PHNUM)) {

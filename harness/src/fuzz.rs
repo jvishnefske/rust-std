@@ -1,6 +1,7 @@
-//! Differential fuzzer: runs the operations in `fuzz/ops.rs` against the real
-//! std (here, in-process) and against rust_std (the `fuzzee` binary, as a
-//! child process) and reports inputs whose transcripts differ.
+//! Differential fuzzer: runs the operations in `apps/fuzzee/ops.rs` against
+//! std on the host (here, in-process) and against std on linux-none (the
+//! `fuzzee` binary, as a child process) and reports inputs whose transcripts
+//! differ.
 
 use std::cell::Cell;
 use std::fmt;
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 
 #[allow(dead_code)]
 mod ops {
-    include!("../../fuzz/ops.rs");
+    include!("../../apps/fuzzee/ops.rs");
 }
 
 pub use ops::TARGETS;
@@ -23,7 +24,7 @@ const CASE_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
     Ok(String),
-    /// panicked (std) or died (rust_std); the message or stderr tail
+    /// panicked (std) or died (linux-none); the message or stderr tail
     Crash(String),
     Hang,
 }
@@ -73,7 +74,7 @@ pub fn reference(target: usize, input: &[u8]) -> Outcome {
     }
 }
 
-// ---------------- rust_std side ----------------
+// ---------------- linux-none side ----------------
 
 /// A running `fuzzee` process (restarted after a crash or hang).
 pub struct Fuzzee {
@@ -202,15 +203,15 @@ pub struct Finding {
     pub target: usize,
     pub input: Vec<u8>,
     pub std: Outcome,
-    pub rust_std: Outcome,
+    pub subject: Outcome,
 }
 
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "target `{}`: rust_std differs from std", TARGETS[self.target])?;
+        writeln!(f, "target `{}`: linux-none differs from std", TARGETS[self.target])?;
         let hex: String = self.input.iter().map(|b| format!("{b:02x}")).collect();
         writeln!(f, "input (hex): {hex}")?;
-        match (&self.std, &self.rust_std) {
+        match (&self.std, &self.subject) {
             (Outcome::Ok(a), Outcome::Ok(b)) => {
                 // show the transcripts up to and including the first difference
                 let (al, bl): (Vec<_>, Vec<_>) = (a.lines().collect(), b.lines().collect());
@@ -218,19 +219,19 @@ impl fmt::Display for Finding {
                 for l in &al[..first] {
                     writeln!(f, "    {l}")?;
                 }
-                writeln!(f, "std:      {}", al.get(first).unwrap_or(&"<end>"))?;
-                write!(f, "rust_std: {}", bl.get(first).unwrap_or(&"<end>"))
+                writeln!(f, "std:        {}", al.get(first).unwrap_or(&"<end>"))?;
+                write!(f, "linux-none: {}", bl.get(first).unwrap_or(&"<end>"))
             }
-            (a, b) => write!(f, "std:      {a:?}\nrust_std: {b:?}"),
+            (a, b) => write!(f, "std:        {a:?}\nlinux-none: {b:?}"),
         }
     }
 }
 
-/// Does rust_std disagree with std on this input?
+/// Does linux-none disagree with std on this input?
 fn check(fz: &mut Fuzzee, target: usize, input: &[u8]) -> Option<Finding> {
     let expected = reference(target, input);
     let actual = fz.call(target, input);
-    (!expected.same(&actual)).then(|| Finding { target, input: input.to_vec(), std: expected, rust_std: actual })
+    (!expected.same(&actual)).then(|| Finding { target, input: input.to_vec(), std: expected, subject: actual })
 }
 
 /// Make a failing input smaller while it still fails.

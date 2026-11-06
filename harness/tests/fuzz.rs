@@ -1,4 +1,5 @@
-//! Differential fuzzing of rust_std against std (see `harness/src/fuzz.rs`).
+//! Differential fuzzing of std on linux-none against std on the host (see
+//! `harness/src/fuzz.rs`).
 //!
 //! Environment:
 //! * `FUZZ_SEED`  — seed to reproduce a run (printed on failure)
@@ -42,20 +43,22 @@ fn run(arch: &str, bin: &Path, runner: Option<&Path>, default_iters: usize) {
     assert!(failures.is_empty(), "fuzzing found differences ({arch}, FUZZ_SEED={seed}):\n\n{}", failures.join("\n\n"));
 }
 
+fn run_arch(arch: Arch, default_iters: usize) {
+    let Some(runner) = arch.runner() else {
+        eprintln!("skipping {}: set QEMU_AARCH64 or put qemu-aarch64 on PATH", arch.name());
+        return;
+    };
+    // fewer cases under emulation
+    let iters = if runner.is_some() { default_iters / 4 } else { default_iters };
+    run(arch.name(), &fuzzee_bin(arch), runner.as_deref(), iters);
+}
+
 #[test]
-fn host_fuzz() {
-    run(std::env::consts::ARCH, &fuzzee_bin(None), None, 3000);
+fn x86_64_fuzz() {
+    run_arch(Arch::X86_64, 3000);
 }
 
 #[test]
 fn aarch64_fuzz() {
-    let Some(qemu) = qemu_aarch64() else {
-        eprintln!("skipping aarch64: set QEMU_AARCH64 or put qemu-aarch64 on PATH");
-        return;
-    };
-    if !aarch64_target_installed() {
-        eprintln!("skipping aarch64: run `rustup target add {AARCH64}`");
-        return;
-    }
-    run("aarch64", &fuzzee_bin(Some(AARCH64)), Some(&qemu), 750);
+    run_arch(Arch::Aarch64, 3000);
 }

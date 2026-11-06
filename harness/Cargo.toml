@@ -3,7 +3,10 @@ name = "harness"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Host-side tests: builds rust_std's examples and checks their behaviour"
+description = "Host-side tests: builds the apps/ programs with std for linux-none and checks them"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+xtask = { path = "../xtask" }

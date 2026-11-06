@@ -3,21 +3,11 @@
 version = 4
 
 [[package]]
-name = "fuzzee"
-version = "0.1.0"
-dependencies = [
- "rust_std",
-]
-
-[[package]]
 name = "harness"
 version = "0.1.0"
-
-[[package]]
-name = "hashbrown"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "xtask",
+]
 
 [[package]]
 name = "linux_none_rt"
@@ -27,30 +17,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust_std"
-version = "0.1.0"
-dependencies = [
- "hashbrown",
- "linux_none_rt",
- "rust_std_mem",
-]
-
-[[package]]
-name = "rust_std_mem"
-version = "0.1.0"
-
-[[package]]
 name = "rustc-std-workspace-core"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9c45b374136f52f2d6311062c7146bff20fec063c3f5d46a410bd937746955"
-
-[[package]]
-name = "stdtests"
-version = "0.1.0"
-dependencies = [
- "rust_std",
-]
 
 [[package]]
 name = "xtask"

@@ -1,11 +1,11 @@
-//! Build each rust_std example and check what it prints, on the host and
-//! (when the target and qemu-aarch64 are available) on aarch64.
+//! Build each example (plain std programs, apps/examples) for linux-none and
+//! check what it prints: x86_64 natively, aarch64 natively or under qemu.
 
 use std::path::{Path, PathBuf};
 
 use harness::*;
 
-const EXAMPLES: &[&str] = &["hello", "args_env", "fs", "threads", "process", "net", "collections", "panic", "stdin"];
+const EXAMPLES: &[&str] = &["hello", "args-env", "fs", "threads", "process", "net", "collections", "panic", "stdin", "smoke"];
 
 struct Env {
     dir: PathBuf,
@@ -18,20 +18,13 @@ impl Env {
     }
 }
 
-fn host() -> Env {
-    Env { dir: examples_dir(None), runner: None }
-}
-
-fn aarch64() -> Option<Env> {
-    let Some(qemu) = qemu_aarch64() else {
-        eprintln!("skipping aarch64: set QEMU_AARCH64 or put qemu-aarch64 on PATH");
+/// The examples for `arch`, or None (with a note) if they cannot run here.
+fn env(arch: Arch) -> Option<Env> {
+    let Some(runner) = arch.runner() else {
+        eprintln!("skipping {}: set QEMU_AARCH64 or put qemu-aarch64 on PATH", arch.name());
         return None;
     };
-    if !aarch64_target_installed() {
-        eprintln!("skipping aarch64: run `rustup target add {AARCH64}`");
-        return None;
-    }
-    Some(Env { dir: examples_dir(Some(AARCH64)), runner: Some(qemu) })
+    Some(Env { dir: examples_dir(arch), runner })
 }
 
 fn has(out: &str, needle: &str) {
@@ -45,7 +38,7 @@ fn check_hello(e: &Env) {
 }
 
 fn check_args_env(e: &Env) {
-    let r = e.run("args_env", &["one", "two words"], b"", &[("RUST_STD_TEST", "orig")]);
+    let r = e.run("args-env", &["one", "two words"], b"", &[("RUST_STD_TEST", "orig")]);
     assert_eq!(r.code(), Some(0), "{}", r.stderr());
     let out = r.stdout();
     has(&out, r#"args: ["one", "two words"]"#);
@@ -56,7 +49,7 @@ fn check_args_env(e: &Env) {
 }
 
 fn check_fs(e: &Env, tag: &str) {
-    let dir = std::env::temp_dir().join(format!("rust_std_fs_{tag}_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("linux_none_fs_{tag}_{}", std::process::id()));
     let r = e.run("fs", &[dir.to_str().unwrap()], b"", &[]);
     assert_eq!(r.code(), Some(0), "{}", r.stderr());
     let out = r.stdout();
@@ -120,7 +113,8 @@ fn check_net(e: &Env) {
     has(&out, r#"tcp echo: "SECOND\n""#);
     has(&out, r#"udp: "ping" from a: true"#);
     has(&out, "refused: ConnectionRefused");
-    has(&out, "dns: Unsupported");
+    // no resolver: only numeric addresses and localhost
+    has(&out, "dns: Uncategorized");
 }
 
 fn check_collections(e: &Env) {
@@ -140,7 +134,7 @@ fn check_panic(e: &Env) {
     // is what a signal-killed process reports
     assert_eq!(r.code(), None, "expected death by signal");
     has(&r.stdout(), "about to panic");
-    has(&r.stderr(), "thread 'main' panicked at examples/panic.rs");
+    has(&r.stderr(), "panicked at examples/src/bin/panic.rs");
     has(&r.stderr(), "index out of bounds: the len is 0 but the index is 11");
 }
 
@@ -163,6 +157,30 @@ fn check_all(e: &Env, tag: &str) {
     check_collections(e);
     check_panic(e);
     check_stdin(e);
+    check_smoke(e);
+}
+
+fn check_smoke(e: &Env) {
+    let r = e.run("smoke", &[], b"", &[]);
+    assert_eq!(r.code(), Some(0), "{}", r.stderr());
+    let out = r.stdout();
+    for line in [
+        "thread sum 6, main count 0",
+        "condvar 4",
+        r#"readdir ["f.txt", "link", "sub"]"#,
+        "canonicalize true",
+        r#"child status exit status: 7 out "child got \"ping\" FOO=Some(\"bar\")""#,
+        r#"sh Some(3) "via PATH\n""#,
+        "missing Err(NotFound)",
+        r#"tcp echo "hello""#,
+        "udp6 Ok(1)",
+        "localhost Ok(",
+        r#"unix pair "uds""#,
+    ] {
+        has(&out, line);
+    }
+    // four spawned threads and the main thread run their TLS destructors
+    assert_eq!(out.matches("tls dtor: thread").count(), 5, "{out}");
 }
 
 fn check_static(dir: &Path, machine: u16) {
@@ -171,16 +189,22 @@ fn check_static(dir: &Path, machine: u16) {
     }
 }
 
+fn check_arch(arch: Arch) {
+    let Some(e) = env(arch) else {
+        // still check that it builds and links statically
+        check_static(&examples_dir(arch), arch.machine());
+        return;
+    };
+    check_static(&e.dir, arch.machine());
+    check_all(&e, arch.name());
+}
+
 #[test]
-fn host_examples() {
-    let e = host();
-    check_static(&e.dir, if cfg!(target_arch = "x86_64") { EM_X86_64 } else { EM_AARCH64 });
-    check_all(&e, "host");
+fn x86_64_examples() {
+    check_arch(Arch::X86_64);
 }
 
 #[test]
 fn aarch64_examples() {
-    let Some(e) = aarch64() else { return };
-    check_static(&e.dir, EM_AARCH64);
-    check_all(&e, "aarch64");
+    check_arch(Arch::Aarch64);
 }

@@ -128,7 +128,7 @@ pub unsafe fn syscall6(n: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5:
 ///
 /// # Safety
 /// Only the kernel may call this, as the ELF entry point.
-#[cfg(entry)]
+#[cfg(linux_none)]
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {

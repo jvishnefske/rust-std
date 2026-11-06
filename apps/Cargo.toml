@@ -1,5 +1,7 @@
+cargo-features = ["profile-rustflags"]
+
 [workspace]
-members = ["hello", "smoke"]
+members = ["examples", "fuzzee", "stdtests"]
 resolver = "3"
 
 [profile.dev]
@@ -7,3 +9,7 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+# std's test suites use features that std's own build enables for them
+[profile.dev.package.stdtests]
+rustflags = ["-Zcrate-attr=feature(sync_poison_mod)"]

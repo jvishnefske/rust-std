@@ -25,7 +25,7 @@ pub const AT_EXECFN: usize = 31;
 
 /// Called from `_start` with the initial stack pointer, where the kernel left
 /// `argc, argv[], NULL, envp[], NULL, auxv[]`.
-#[cfg(entry)]
+#[cfg(linux_none)]
 pub(crate) unsafe extern "C" fn start(sp: *const usize) -> ! {
     unsafe extern "C" {
         fn main(argc: i32, argv: *const *const u8) -> i32;
@@ -60,7 +60,7 @@ pub unsafe fn init(sp: *const usize) {
 }
 
 /// Run static constructors (`.init_array`), as crt startup code would.
-#[cfg(entry)]
+#[cfg(linux_none)]
 unsafe fn run_init_array() {
     unsafe extern "C" {
         static __init_array_start: [unsafe extern "C" fn(); 0];
@@ -105,7 +105,7 @@ pub fn auxv(key: usize) -> Option<usize> {
 }
 
 /// libc's `getauxval`, which compiler-builtins calls on aarch64.
-#[cfg(all(entry, target_arch = "aarch64", not(kani)))]
+#[cfg(all(linux_none, target_arch = "aarch64", not(kani)))]
 #[unsafe(no_mangle)]
 extern "C" fn getauxval(key: core::ffi::c_ulong) -> core::ffi::c_ulong {
     auxv(key as usize).unwrap_or(0) as core::ffi::c_ulong
@@ -159,5 +159,21 @@ mod unwind_stubs {
     #[unsafe(no_mangle)]
     extern "C" fn _Unwind_GetIP(_ctx: *mut u8) -> usize {
         0
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn _Unwind_GetIPInfo(_ctx: *mut u8, before: *mut i32) -> usize {
+        unsafe { *before = 0 };
+        0
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn _Unwind_GetCFA(_ctx: *mut u8) -> usize {
+        0
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn _Unwind_FindEnclosingFunction(_pc: *mut u8) -> *mut u8 {
+        core::ptr::null_mut()
     }
 }

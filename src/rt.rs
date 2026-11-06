@@ -2,127 +2,61 @@
 
 use core::cell::UnsafeCell;
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use linux_none_rt as rt;
+use rt::arch::KSigaction;
 
 use crate::sys::linux;
 use crate::sys::tls::ThreadData;
 
-pub use crate::sys::arch::_start;
+pub use rt::arch::_start;
 
-static ARGC: AtomicUsize = AtomicUsize::new(0);
-static ARGV: AtomicPtr<*const u8> = AtomicPtr::new(core::ptr::null_mut());
-static ENVP: AtomicPtr<*const u8> = AtomicPtr::new(core::ptr::null_mut());
-static AUXV: AtomicPtr<usize> = AtomicPtr::new(core::ptr::null_mut());
 static TLS_READY: AtomicBool = AtomicBool::new(false);
 
 struct MainThreadData(UnsafeCell<ThreadData>);
 unsafe impl Sync for MainThreadData {}
 static MAIN_THREAD: MainThreadData = MainThreadData(UnsafeCell::new(ThreadData::new()));
 
-unsafe extern "Rust" {
-    /// Defined by the application through [`crate::main!`].
-    fn __rust_std_main() -> i32;
-}
-
-/// Called from `_start` with the initial stack pointer.
-pub(crate) unsafe extern "C" fn start(sp: *const usize) -> ! {
+/// Called from the C `main` that [`crate::main!`] defines, which the
+/// runtime's `_start` calls.
+pub fn lang_start(main: impl FnOnce() -> i32) -> i32 {
     unsafe {
-        let argc = *sp;
-        let argv = sp.add(1) as *mut *const u8;
-        ARGC.store(argc, Ordering::Relaxed);
-        ARGV.store(argv, Ordering::Relaxed);
-        let envp = argv.add(argc + 1);
-        ENVP.store(envp, Ordering::Relaxed);
-        let mut p = envp;
-        while !(*p).is_null() {
-            p = p.add(1);
-        }
-        AUXV.store(p.add(1) as *mut usize, Ordering::Relaxed);
-
         ThreadData::install(MAIN_THREAD.0.get());
         TLS_READY.store(true, Ordering::Relaxed);
-
-        run_init_array();
         (*MAIN_THREAD.0.get()).set_thread(crate::thread::Thread::new_main());
-
-        // like std: writes to a closed pipe return EPIPE instead of killing us
-        let act = crate::sys::arch::KSigaction { handler: linux::SIG_IGN, flags: 0, restorer: 0, mask: 0 };
-        let _ = linux::rt_sigaction(linux::SIGPIPE, &act, core::ptr::null_mut());
-
-        let code = __rust_std_main();
-        exit(code)
     }
+    rt::start::set_exit_hook(crate::io::stdio::cleanup);
+
+    // like std: writes to a closed pipe return EPIPE instead of killing us
+    let act = KSigaction { handler: linux::SIG_IGN, flags: 0, restorer: 0, mask: 0 };
+    let _ = unsafe { linux::rt_sigaction(linux::SIGPIPE, &act, core::ptr::null_mut()) };
+    main()
 }
 
 /// Flush stdio and terminate the process.
 pub(crate) fn exit(code: i32) -> ! {
-    crate::io::stdio::cleanup();
-    linux::exit_group(code)
+    rt::start::exit(code)
 }
 
-/// Run static constructors (`.init_array`), as crt startup code would.
-/// compiler-builtins uses one on aarch64 to detect LSE atomics.
-unsafe fn run_init_array() {
-    unsafe extern "C" {
-        static __init_array_start: [unsafe extern "C" fn(); 0];
-        static __init_array_end: [unsafe extern "C" fn(); 0];
-    }
-    unsafe {
-        let mut f = &raw const __init_array_start as *const unsafe extern "C" fn();
-        let end = &raw const __init_array_end as *const unsafe extern "C" fn();
-        while f < end {
-            (*f)();
-            f = f.add(1);
-        }
-    }
-}
-
-/// Look up an entry of the ELF auxiliary vector the kernel passed us.
 pub(crate) fn auxv(key: usize) -> Option<usize> {
-    let mut p = AUXV.load(Ordering::Relaxed) as *const usize;
-    if p.is_null() {
-        return None;
-    }
-    unsafe {
-        while *p != 0 {
-            if *p == key {
-                return Some(*p.add(1));
-            }
-            p = p.add(2);
-        }
-    }
-    None
-}
-
-/// libc's `getauxval`, which compiler-builtins calls on aarch64.
-#[cfg(all(target_arch = "aarch64", not(kani)))]
-#[unsafe(no_mangle)]
-extern "C" fn getauxval(key: core::ffi::c_ulong) -> core::ffi::c_ulong {
-    auxv(key as usize).unwrap_or(0) as core::ffi::c_ulong
+    rt::start::auxv(key)
 }
 
 pub(crate) fn argv() -> &'static [*const u8] {
-    let argv = ARGV.load(Ordering::Relaxed);
+    let (argc, argv) = rt::start::args();
     if argv.is_null() {
         return &[];
     }
-    unsafe { core::slice::from_raw_parts(argv, ARGC.load(Ordering::Relaxed)) }
+    unsafe { core::slice::from_raw_parts(argv, argc) }
 }
 
 pub(crate) fn envp() -> *const *const u8 {
-    ENVP.load(Ordering::Relaxed)
+    rt::start::envp()
 }
 
-/// Raise SIGABRT with the default disposition, as `std::process::abort` does.
 pub(crate) fn abort() -> ! {
-    unsafe {
-        let act = crate::sys::arch::KSigaction { handler: linux::SIG_DFL, flags: 0, restorer: 0, mask: 0 };
-        let _ = linux::rt_sigaction(linux::SIGABRT, &act, core::ptr::null_mut());
-        let set: u64 = 1 << (linux::SIGABRT - 1);
-        let _ = linux::rt_sigprocmask(linux::SIG_UNBLOCK, &set, core::ptr::null_mut());
-    }
-    let _ = linux::tgkill(linux::getpid(), linux::gettid(), linux::SIGABRT);
-    linux::exit_group(134)
+    rt::start::abort()
 }
 
 #[cfg_attr(test, allow(dead_code))]

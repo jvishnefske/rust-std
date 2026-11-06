@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "mem", "harness", "stdtests", "fuzz"]
+members = [".", "mem", "harness", "stdtests", "fuzz", "xtask", "rt"]
 # `cargo test` runs the harness, which builds the examples itself: the test
 # profile forces panic=unwind, which rust_std binaries cannot use.
 # Build the examples directly with `cargo build -p rust_std --examples`.
@@ -22,6 +22,7 @@ global-allocator = []
 
 [dependencies]
 rust_std_mem = { path = "mem" }
+linux_none_rt = { path = "rt", features = ["entry"] }
 hashbrown = { version = "0.16", default-features = false }
 
 [profile.dev]

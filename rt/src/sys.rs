@@ -1,8 +1,8 @@
 //! Typed syscall wrappers. Every wrapper returns `Err(errno)` on failure.
-#![allow(dead_code)] // a syscall table: not every constant is used yet
 
-use super::arch::syscall6;
-use super::nr;
+
+use crate::arch::syscall6;
+use crate::arch::nr;
 
 pub type SysResult<T = usize> = Result<T, i32>;
 
@@ -67,6 +67,21 @@ pub const ETIMEDOUT: i32 = 110;
 pub const ECONNREFUSED: i32 = 111;
 pub const EHOSTUNREACH: i32 = 113;
 pub const EINPROGRESS: i32 = 115;
+pub const ESRCH: i32 = 3;
+pub const ENOEXEC: i32 = 8;
+pub const EFAULT: i32 = 14;
+pub const ENODEV: i32 = 19;
+pub const EMFILE: i32 = 24;
+pub const ENOTTY: i32 = 25;
+pub const EDOM: i32 = 33;
+pub const ENOTSOCK: i32 = 88;
+pub const EOPNOTSUPP: i32 = 95;
+pub const EAFNOSUPPORT: i32 = 97;
+pub const EISCONN: i32 = 106;
+pub const EALREADY: i32 = 114;
+pub const ESTALE: i32 = 116;
+pub const EDQUOT: i32 = 122;
+pub const EWOULDBLOCK: i32 = EAGAIN;
 
 // ---- open / at ----
 pub const AT_FDCWD: i32 = -100;
@@ -129,6 +144,8 @@ pub const SIGABRT: usize = 6;
 pub const SIGKILL: usize = 9;
 pub const SIGPIPE: usize = 13;
 pub const SIGCHLD: usize = 17;
+pub const SIGSEGV: usize = 11;
+pub const SIGBUS: usize = 7;
 pub const SIG_IGN: usize = 1;
 pub const SIG_DFL: usize = 0;
 pub const SIG_UNBLOCK: usize = 1;
@@ -136,6 +153,7 @@ pub const SIG_SETMASK: usize = 2;
 
 // ---- clone ----
 pub const CLONE_VM: usize = 0x100;
+pub const CLONE_VFORK: usize = 0x4000;
 pub const CLONE_FS: usize = 0x200;
 pub const CLONE_FILES: usize = 0x400;
 pub const CLONE_SIGHAND: usize = 0x800;
@@ -221,6 +239,13 @@ pub struct Statx {
 }
 pub const STATX_BASIC_STATS: u32 = 0x7ff;
 pub const STATX_BTIME: u32 = 0x800;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct IoVec {
+    pub base: *const u8,
+    pub len: usize,
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -367,7 +392,7 @@ pub fn kill(pid: i32, sig: usize) -> SysResult {
 pub fn tgkill(pid: u32, tid: u32, sig: usize) -> SysResult {
     unsafe { sc!(nr::TGKILL, pid, tid, sig) }
 }
-pub unsafe fn rt_sigaction(sig: usize, act: *const super::arch::KSigaction, old: *mut super::arch::KSigaction) -> SysResult {
+pub unsafe fn rt_sigaction(sig: usize, act: *const crate::arch::KSigaction, old: *mut crate::arch::KSigaction) -> SysResult {
     unsafe { sc!(nr::RT_SIGACTION, sig, act, old, 8) }
 }
 pub unsafe fn rt_sigprocmask(how: usize, set: *const u64, old: *mut u64) -> SysResult {
@@ -391,6 +416,91 @@ pub unsafe fn getrandom(buf: *mut u8, len: usize, flags: u32) -> SysResult {
 }
 pub unsafe fn ppoll(fds: *mut PollFd, n: usize, timeout: *const Timespec) -> SysResult {
     unsafe { sc!(nr::PPOLL, fds, n, timeout, 0, 8) }
+}
+
+pub fn setuid(uid: u32) -> SysResult {
+    unsafe { sc!(nr::SETUID, uid) }
+}
+pub fn setgid(gid: u32) -> SysResult {
+    unsafe { sc!(nr::SETGID, gid) }
+}
+pub unsafe fn setgroups(n: usize, groups: *const u32) -> SysResult {
+    unsafe { sc!(nr::SETGROUPS, n, groups) }
+}
+pub fn setpgid(pid: i32, pgid: i32) -> SysResult {
+    unsafe { sc!(nr::SETPGID, pid as isize, pgid as isize) }
+}
+pub fn setsid() -> SysResult {
+    unsafe { sc!(nr::SETSID) }
+}
+pub fn getppid() -> u32 {
+    unsafe { sc!(nr::GETPPID) }.unwrap_or(0) as u32
+}
+pub fn getgid() -> u32 {
+    unsafe { sc!(nr::GETGID) }.unwrap_or(0) as u32
+}
+pub fn geteuid() -> u32 {
+    unsafe { sc!(nr::GETEUID) }.unwrap_or(0) as u32
+}
+pub fn getegid() -> u32 {
+    unsafe { sc!(nr::GETEGID) }.unwrap_or(0) as u32
+}
+pub unsafe fn readv(fd: i32, iov: *const IoVec, n: usize) -> SysResult {
+    unsafe { sc!(nr::READV, fd, iov, n) }
+}
+pub unsafe fn writev(fd: i32, iov: *const IoVec, n: usize) -> SysResult {
+    unsafe { sc!(nr::WRITEV, fd, iov, n) }
+}
+pub unsafe fn preadv(fd: i32, iov: *const IoVec, n: usize, off: u64) -> SysResult {
+    unsafe { sc!(nr::PREADV, fd, iov, n, off, 0) }
+}
+pub unsafe fn pwritev(fd: i32, iov: *const IoVec, n: usize, off: u64) -> SysResult {
+    unsafe { sc!(nr::PWRITEV, fd, iov, n, off, 0) }
+}
+pub fn fchown(fd: i32, uid: u32, gid: u32) -> SysResult {
+    unsafe { sc!(nr::FCHOWN, fd, uid, gid) }
+}
+pub unsafe fn fchownat(dirfd: i32, path: *const u8, uid: u32, gid: u32, flags: u32) -> SysResult {
+    unsafe { sc!(nr::FCHOWNAT, dirfd, path, uid, gid, flags) }
+}
+pub unsafe fn utimensat(dirfd: i32, path: *const u8, times: *const Timespec, flags: u32) -> SysResult {
+    unsafe { sc!(nr::UTIMENSAT, dirfd, path, times, flags) }
+}
+pub fn fchdir(fd: i32) -> SysResult {
+    unsafe { sc!(nr::FCHDIR, fd) }
+}
+pub fn dup(fd: i32) -> SysResult<i32> {
+    unsafe { sc!(nr::DUP, fd).map(|f| f as i32) }
+}
+pub unsafe fn truncate(path: *const u8, len: u64) -> SysResult {
+    unsafe { sc!(nr::TRUNCATE, path, len) }
+}
+pub fn flock(fd: i32, op: u32) -> SysResult {
+    unsafe { sc!(nr::FLOCK, fd, op) }
+}
+pub unsafe fn ioctl(fd: i32, req: usize, arg: usize) -> SysResult {
+    unsafe { sc!(nr::IOCTL, fd, req, arg) }
+}
+pub unsafe fn prctl(op: usize, a: usize, b: usize, c: usize, d: usize) -> SysResult {
+    unsafe { sc!(nr::PRCTL, op, a, b, c, d) }
+}
+pub unsafe fn socketpair(domain: u16, ty: u32, proto: u32, fds: *mut [i32; 2]) -> SysResult {
+    unsafe { sc!(nr::SOCKETPAIR, domain, ty, proto, fds) }
+}
+pub unsafe fn sendmsg(fd: i32, msg: *const u8, flags: u32) -> SysResult {
+    unsafe { sc!(nr::SENDMSG, fd, msg, flags) }
+}
+pub unsafe fn recvmsg(fd: i32, msg: *mut u8, flags: u32) -> SysResult {
+    unsafe { sc!(nr::RECVMSG, fd, msg, flags) }
+}
+pub unsafe fn copy_file_range(fd_in: i32, off_in: *mut i64, fd_out: i32, off_out: *mut i64, len: usize, flags: u32) -> SysResult {
+    unsafe { sc!(nr::COPY_FILE_RANGE, fd_in, off_in, fd_out, off_out, len, flags) }
+}
+pub unsafe fn waitid(idtype: u32, id: u32, info: *mut u8, options: u32) -> SysResult {
+    unsafe { sc!(nr::WAITID, idtype, id, info, options, 0) }
+}
+pub fn pidfd_open(pid: i32, flags: u32) -> SysResult<i32> {
+    unsafe { sc!(nr::PIDFD_OPEN, pid, flags).map(|f| f as i32) }
 }
 
 /// `fork()` expressed as `clone(SIGCHLD)`; aarch64 has no fork syscall.
@@ -454,7 +564,7 @@ pub fn write_all_raw(fd: i32, mut buf: &[u8]) {
 }
 
 /// Short description of an errno value, as `strerror` would give.
-pub fn strerror(e: i32) -> &'static str {
+pub const fn strerror(e: i32) -> &'static str {
     match e {
         EPERM => "Operation not permitted",
         ENOENT => "No such file or directory",

@@ -1,0 +1,4 @@
+# Built by `cargo xtask sysroot` in the repository root: the pinned nightly
+# with the patched std sources.
+[toolchain]
+channel = "linux-none"

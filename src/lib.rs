@@ -102,10 +102,11 @@ static GLOBAL: alloc::System = alloc::System;
 #[macro_export]
 macro_rules! main {
     ($main:path) => {
+        // the C `main` the runtime's `_start` calls
         #[doc(hidden)]
-        #[unsafe(no_mangle)]
-        pub fn __rust_std_main() -> i32 {
-            $crate::process::Termination::report($main()).to_i32()
+        #[unsafe(export_name = "main")]
+        pub extern "C" fn __rust_std_main(_argc: i32, _argv: *const *const u8) -> i32 {
+            $crate::rt::lang_start(|| $crate::process::Termination::report($main()).to_i32())
         }
 
         // keep the runtime's `_start` in the link

@@ -5,8 +5,8 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::ptr::null_mut;
 
-use super::linux::{self, MAP_ANONYMOUS, MAP_PRIVATE, PAGE_SIZE, PROT_READ, PROT_WRITE};
-use super::locks::RawMutex;
+use crate::sys::{self as linux, MAP_ANONYMOUS, MAP_PRIVATE, PAGE_SIZE, PROT_READ, PROT_WRITE};
+use crate::locks::RawMutex;
 
 const MIN_SHIFT: u32 = 4; // 16 bytes
 const MAX_SHIFT: u32 = 15; // 32 KiB

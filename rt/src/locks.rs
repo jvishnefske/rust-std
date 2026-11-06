@@ -4,7 +4,7 @@ use core::sync::atomic::AtomicU32;
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 use core::time::Duration;
 
-use super::futex;
+use crate::futex;
 
 const UNLOCKED: u32 = 0;
 const LOCKED: u32 = 1;

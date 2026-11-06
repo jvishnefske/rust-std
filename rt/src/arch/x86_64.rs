@@ -66,6 +66,40 @@ pub mod nr {
     pub const RENAMEAT2: usize = 316;
     pub const GETRANDOM: usize = 318;
     pub const STATX: usize = 332;
+    pub const READV: usize = 19;
+    pub const WRITEV: usize = 20;
+    pub const PREADV: usize = 295;
+    pub const PWRITEV: usize = 296;
+    pub const SETUID: usize = 105;
+    pub const SETGID: usize = 106;
+    pub const SETGROUPS: usize = 116;
+    pub const SETPGID: usize = 109;
+    pub const SETSID: usize = 112;
+    pub const GETPPID: usize = 110;
+    pub const GETGID: usize = 104;
+    pub const GETEUID: usize = 107;
+    pub const GETEGID: usize = 108;
+    pub const FCHOWN: usize = 93;
+    pub const FCHOWNAT: usize = 260;
+    pub const UTIMENSAT: usize = 280;
+    pub const FCHDIR: usize = 81;
+    pub const SOCKETPAIR: usize = 53;
+    pub const SENDMSG: usize = 46;
+    pub const RECVMSG: usize = 47;
+    pub const FLOCK: usize = 73;
+    pub const COPY_FILE_RANGE: usize = 326;
+    pub const UNAME: usize = 63;
+    pub const PRCTL: usize = 157;
+    pub const PRLIMIT64: usize = 302;
+    pub const SIGALTSTACK: usize = 131;
+    pub const MADVISE: usize = 28;
+    pub const PIDFD_OPEN: usize = 434;
+    pub const WAITID: usize = 247;
+    pub const FSTATFS: usize = 138;
+    pub const MREMAP: usize = 25;
+    pub const TRUNCATE: usize = 76;
+    pub const FCHMODAT2: usize = 452;
+    pub const DUP: usize = 32;
 }
 
 /// # Safety
@@ -91,6 +125,7 @@ pub unsafe fn syscall6(n: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5:
 ///
 /// # Safety
 /// Only the kernel may call this, as the ELF entry point.
+#[cfg(entry)]
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -100,7 +135,7 @@ pub unsafe extern "C" fn _start() -> ! {
         "and rsp, -16",
         "call {start}",
         "ud2",
-        start = sym crate::rt::start,
+        start = sym crate::start::start,
     )
 }
 

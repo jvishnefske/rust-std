@@ -177,14 +177,14 @@ impl Rng {
     pub fn new(seed: u64) -> Rng {
         Rng(seed | 1)
     }
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
         self.0.wrapping_mul(0x2545F4914F6CDD1D)
     }
     fn below(&mut self, n: usize) -> usize {
-        (self.next() % n as u64) as usize
+        (self.next_u64() % n as u64) as usize
     }
 }
 
@@ -195,7 +195,7 @@ fn gen_input(rng: &mut Rng) -> Vec<u8> {
         1 | 2 => rng.below(64),
         _ => rng.below(256),
     };
-    (0..len).map(|_| rng.next() as u8).collect()
+    (0..len).map(|_| rng.next_u64() as u8).collect()
 }
 
 pub struct Finding {

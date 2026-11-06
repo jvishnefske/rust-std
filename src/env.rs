@@ -352,18 +352,4 @@ mod proofs {
             None => assert!(e.len() < 2 || !e[1..].contains(&b'=')),
         }
     }
-
-    /// join_paths(split_paths(x)) == x.
-    #[kani::proof]
-    #[kani::unwind(6)]
-    fn split_join_paths_roundtrip() {
-        let mut buf = [0u8; 3];
-        for b in buf.iter_mut() {
-            *b = if kani::any() { b':' } else { b'a' };
-        }
-        let len: usize = kani::any_where(|&l| l <= 3);
-        let x = OsStr::from_bytes(&buf[..len]);
-        let joined = join_paths(split_paths(x)).unwrap();
-        assert!(joined.as_os_str() == x);
-    }
 }

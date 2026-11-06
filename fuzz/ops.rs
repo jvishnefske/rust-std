@@ -252,7 +252,7 @@ fn bufread(u: &mut Un, out: &mut String) {
                 r.is_ok()
             }
             2 => {
-                let d = [b'\n', b'a', b'x'][u.below(3)];
+                let d = b"\nax"[u.below(3)];
                 let mut v = Vec::new();
                 let r = r.read_until(d, &mut v);
                 let _ = writeln!(out, "read_until {d} {} {v:?}", res(&r));
@@ -327,7 +327,7 @@ impl Write for Recorder {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.calls += 1;
         // interrupt >= 2 when set, so a retry always gets through
-        if self.interrupt != 0 && self.calls % self.interrupt == 0 {
+        if self.interrupt != 0 && self.calls.is_multiple_of(self.interrupt) {
             return Err(io::Error::from(io::ErrorKind::Interrupted));
         }
         let n = buf.len().min(self.limit);
@@ -447,7 +447,7 @@ fn alloc(u: &mut Un, out: &mut String) {
     let mut live: Vec<(*mut u8, Layout, u8)> = Vec::new();
     let check = |p: *mut u8, l: Layout, fill: u8| -> bool {
         let s = unsafe { std::slice::from_raw_parts(p, l.size()) };
-        s.iter().all(|&b| b == fill) && (p as usize) % l.align() == 0
+        s.iter().all(|&b| b == fill) && (p as usize).is_multiple_of(l.align())
     };
     for step in 0..24 {
         if u.done() {
@@ -485,7 +485,7 @@ fn alloc(u: &mut Un, out: &mut String) {
                 let kept = l.size().min(new_size);
                 let nl = Layout::from_size_align(new_size, l.align()).unwrap();
                 let prefix_ok = unsafe { std::slice::from_raw_parts(q, kept) }.iter().all(|&b| b == fill);
-                if !prefix_ok || (q as usize) % l.align() != 0 {
+                if !prefix_ok || !(q as usize).is_multiple_of(l.align()) {
                     let _ = writeln!(out, "{step}: CORRUPT after realloc");
                 }
                 unsafe { q.write_bytes(fill, new_size) };

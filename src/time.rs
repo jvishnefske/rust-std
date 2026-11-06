@@ -97,6 +97,8 @@ pub struct SystemTime {
 
 pub const UNIX_EPOCH: SystemTime = SystemTime { secs: 0, nanos: 0 };
 
+const NSEC: u32 = 1_000_000_000;
+
 #[derive(Clone, Debug)]
 pub struct SystemTimeError(Duration);
 
@@ -122,32 +124,43 @@ impl SystemTime {
         SystemTime { secs: ts.sec, nanos: ts.nsec as u32 }
     }
 
-    fn as_nanos(&self) -> i128 {
-        self.secs as i128 * 1_000_000_000 + self.nanos as i128
-    }
-
-    fn from_nanos(n: i128) -> Option<SystemTime> {
-        let secs = n.div_euclid(1_000_000_000);
-        let nanos = n.rem_euclid(1_000_000_000) as u32;
-        Some(SystemTime { secs: i64::try_from(secs).ok()?, nanos })
+    /// `self - earlier` for `self >= earlier` (the difference of two i64
+    /// second counts always fits in a u64).
+    fn sub_parts(&self, earlier: &SystemTime) -> Duration {
+        if self.nanos >= earlier.nanos {
+            Duration::new(self.secs.wrapping_sub(earlier.secs) as u64, self.nanos - earlier.nanos)
+        } else {
+            Duration::new(self.secs.wrapping_sub(earlier.secs).wrapping_sub(1) as u64, self.nanos + NSEC - earlier.nanos)
+        }
     }
 
     pub fn duration_since(&self, earlier: SystemTime) -> Result<Duration, SystemTimeError> {
-        let diff = self.as_nanos() - earlier.as_nanos();
-        let d = |n: i128| Duration::new((n / 1_000_000_000) as u64, (n % 1_000_000_000) as u32);
-        if diff >= 0 { Ok(d(diff)) } else { Err(SystemTimeError(d(-diff))) }
+        if *self >= earlier { Ok(self.sub_parts(&earlier)) } else { Err(SystemTimeError(earlier.sub_parts(self))) }
     }
 
     pub fn elapsed(&self) -> Result<Duration, SystemTimeError> {
         SystemTime::now().duration_since(*self)
     }
 
+    // seconds/nanoseconds arithmetic with a carry, as std's Timespec does
     pub fn checked_add(&self, d: Duration) -> Option<SystemTime> {
-        Self::from_nanos(self.as_nanos().checked_add(d.as_nanos() as i128)?)
+        let mut secs = self.secs.checked_add_unsigned(d.as_secs())?;
+        let mut nanos = self.nanos + d.subsec_nanos();
+        if nanos >= NSEC {
+            nanos -= NSEC;
+            secs = secs.checked_add(1)?;
+        }
+        Some(SystemTime { secs, nanos })
     }
 
     pub fn checked_sub(&self, d: Duration) -> Option<SystemTime> {
-        Self::from_nanos(self.as_nanos().checked_sub(d.as_nanos() as i128)?)
+        let mut secs = self.secs.checked_sub_unsigned(d.as_secs())?;
+        let mut nanos = self.nanos as i32 - d.subsec_nanos() as i32;
+        if nanos < 0 {
+            nanos += NSEC as i32;
+            secs = secs.checked_sub(1)?;
+        }
+        Some(SystemTime { secs, nanos: nanos as u32 })
     }
 
     pub(crate) fn from_parts(secs: i64, nanos: u32) -> SystemTime {
@@ -191,19 +204,39 @@ impl fmt::Debug for SystemTime {
 mod proofs {
     use super::*;
 
-    /// The nanosecond representation used for SystemTime arithmetic
-    /// round-trips for every representable time.
-    #[kani::proof]
-    fn system_time_nanos_roundtrip() {
-        let t = SystemTime { secs: kani::any(), nanos: kani::any_where(|&n| n < 1_000_000_000) };
-        assert!(SystemTime::from_nanos(t.as_nanos()) == Some(t));
+    fn any_time() -> SystemTime {
+        SystemTime { secs: kani::any(), nanos: kani::any_where(|&n| n < NSEC) }
+    }
+
+    fn any_duration() -> Duration {
+        Duration::new(kani::any(), kani::any_where(|&n| n < NSEC))
     }
 
     /// duration_since succeeds exactly when the other time is not later.
     #[kani::proof]
-    fn duration_since_sign() {
-        let a = SystemTime { secs: kani::any_where(|s: &i64| s.unsigned_abs() < 1 << 40), nanos: kani::any_where(|&n| n < 1_000_000_000) };
-        let b = SystemTime { secs: kani::any_where(|s: &i64| s.unsigned_abs() < 1 << 40), nanos: kani::any_where(|&n| n < 1_000_000_000) };
+    fn duration_since_matches_order() {
+        let (a, b) = (any_time(), any_time());
         assert_eq!(a.duration_since(b).is_ok(), a >= b);
+    }
+
+    /// Adding a duration and measuring back recovers it, and subtracting it
+    /// recovers the original time.
+    #[kani::proof]
+    fn add_then_measure_roundtrip() {
+        let (t, d) = (any_time(), any_duration());
+        if let Some(u) = t.checked_add(d) {
+            assert!(u.duration_since(t).ok() == Some(d));
+            assert!(u.checked_sub(d) == Some(t));
+        }
+    }
+
+    /// The measured difference between two times takes one to the other.
+    #[kani::proof]
+    fn measure_then_add_roundtrip() {
+        let (a, b) = (any_time(), any_time());
+        match a.duration_since(b) {
+            Ok(d) => assert!(b.checked_add(d) == Some(a)),
+            Err(e) => assert!(a.checked_add(e.duration()) == Some(b)),
+        }
     }
 }

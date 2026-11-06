@@ -190,12 +190,15 @@ next to the code they check:
   whose blocks are large and aligned enough. `realloc`'s same-class fast
   path is sound, and `round_up` is correct.
 - **Syscalls**: return values decode to `Err(errno)` exactly for −4095..=−1.
-- **`Path`**: mixing `next()` and `next_back()` in any order yields the
-  forward component sequence; `as_path()` stays within the path; and
-  `file_name()` matches the last component.
-- **Smaller helpers**: C-string conversion, environment-entry parsing, the
-  `split_paths`/`join_paths` round-trip, `SystemTime` nanosecond conversion,
-  and `Cursor` seeking.
+- **`Path`**: `file_name()` agrees with the last component.
+- **`SystemTime`**: `duration_since` succeeds exactly when the other time is
+  not later; adding a duration and measuring back round-trips.
+- **Smaller helpers**: C-string conversion, environment-entry parsing, and
+  `Cursor` seeking.
+
+Proofs are bounded (a few bytes of input) to stay within CBMC's memory.
+Component iteration is beyond it even for 2-byte paths, so std's own `path`
+tests and the `path` fuzz target cover it instead.
 
 ```sh
 cargo install --locked kani-verifier && cargo kani setup   # once

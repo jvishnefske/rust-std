@@ -158,7 +158,7 @@ impl fmt::Display for Display<'_> {
                     .utf8_chunks()
                     .map(|c| c.valid().chars().count() + usize::from(!c.invalid().is_empty()))
                     .sum();
-                (&bytes[..], width)
+                (bytes, width)
             }
         };
         let pad = requested.saturating_sub(width);

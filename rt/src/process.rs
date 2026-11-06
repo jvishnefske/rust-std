@@ -3,12 +3,9 @@
 //!
 //! Without pre-exec callbacks the child shares the parent's memory and runs
 //! on a small stack of its own (`CLONE_VM | CLONE_VFORK`); the parent sleeps
-//! until it has called `execve` or failed, and the child reports a failure by
-//! writing the errno into the parent's memory. With callbacks (which may run
-//! arbitrary code) it is a full copy (`fork`), and a close-on-exec pipe
-//! carries the errno back instead.
-
-use core::sync::atomic::{AtomicI32, Ordering};
+//! until it has called `execve` or failed. With callbacks (which may run
+//! arbitrary code) it is a full copy (`fork`). Either way a close-on-exec
+//! pipe carries the errno of a failure back to the parent.
 
 use crate::sys::{self, SysResult};
 
@@ -66,14 +63,22 @@ pub unsafe fn spawn(s: &mut Spawn<'_>) -> SysResult<i32> {
 struct VforkArg<'s, 'a> {
     s: &'s mut Spawn<'a>,
     mask: u64,
-    err: AtomicI32,
+    /// write end of the error pipe
+    err: i32,
 }
 
 unsafe fn spawn_vfork(s: &mut Spawn<'_>, mask: u64) -> SysResult<i32> {
-    let stack = unsafe {
-        sys::mmap(0, CHILD_STACK, sys::PROT_READ | sys::PROT_WRITE, sys::MAP_PRIVATE | sys::MAP_ANONYMOUS, -1, 0)?
+    let [r, w] = sys::pipe2(sys::O_CLOEXEC)?;
+    let stack = match unsafe {
+        sys::mmap(0, CHILD_STACK, sys::PROT_READ | sys::PROT_WRITE, sys::MAP_PRIVATE | sys::MAP_ANONYMOUS, -1, 0)
+    } {
+        Ok(stack) => stack,
+        Err(e) => {
+            let _ = (sys::close(r), sys::close(w));
+            return Err(e);
+        }
     };
-    let arg = VforkArg { s, mask, err: AtomicI32::new(0) };
+    let arg = VforkArg { s, mask, err: w };
     // the trampoline pops `vfork_child` then `&arg` off the new stack
     let sp = (stack + CHILD_STACK - 16) as *mut usize;
     unsafe {
@@ -83,24 +88,18 @@ unsafe fn spawn_vfork(s: &mut Spawn<'_>, mask: u64) -> SysResult<i32> {
     let flags = sys::CLONE_VM | sys::CLONE_VFORK | sys::SIGCHLD;
     let pid = unsafe { crate::arch::clone_thread(flags, sp, core::ptr::null_mut(), core::ptr::null_mut(), 0) };
     let _ = unsafe { sys::munmap(stack, CHILD_STACK) };
+    let _ = sys::close(w);
     if pid < 0 {
+        let _ = sys::close(r);
         return Err(-pid as i32);
     }
-    // CLONE_VFORK: the child has exec'd or exited by now
-    match arg.err.load(Ordering::Relaxed) {
-        0 => Ok(pid as i32),
-        e => {
-            reap(pid as i32);
-            Err(e)
-        }
-    }
+    wait_exec(r, pid as i32)
 }
 
 extern "C" fn vfork_child(arg: *mut u8) -> ! {
     let arg = unsafe { &mut *(arg as *mut VforkArg<'_, '_>) };
     let e = unsafe { child(arg.s, arg.mask) };
-    arg.err.store(e, Ordering::Relaxed);
-    sys::exit_group(127)
+    report(arg.err, e)
 }
 
 unsafe fn spawn_fork(s: &mut Spawn<'_>, mask: u64) -> SysResult<i32> {
@@ -116,11 +115,24 @@ unsafe fn spawn_fork(s: &mut Spawn<'_>, mask: u64) -> SysResult<i32> {
     if pid == 0 {
         let _ = sys::close(r);
         let e = unsafe { child(s, mask) };
-        let b = e.to_ne_bytes();
-        let _ = unsafe { sys::write(w, b.as_ptr(), 4) };
-        sys::exit_group(127)
+        report(w, e)
     }
     let _ = sys::close(w);
+    wait_exec(r, pid)
+}
+
+/// In the child: send the errno that stopped it to the parent, and exit.
+fn report(pipe: i32, errno: i32) -> ! {
+    let b = errno.to_ne_bytes();
+    let _ = unsafe { sys::write(pipe, b.as_ptr(), 4) };
+    sys::exit_group(127)
+}
+
+/// In the parent: wait for the child to exec (the close-on-exec pipe reads
+/// EOF) or to report an errno. Even with `CLONE_VFORK` the errno comes
+/// through the pipe rather than shared memory: qemu-user, for one, runs
+/// such a child as a plain fork.
+fn wait_exec(r: i32, pid: i32) -> SysResult<i32> {
     let mut b = [0u8; 4];
     let n = loop {
         match unsafe { sys::read(r, b.as_mut_ptr(), 4) } {

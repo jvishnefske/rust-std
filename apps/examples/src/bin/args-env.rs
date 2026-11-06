@@ -9,4 +9,9 @@ fn main() {
     let cwd = std::env::current_dir().unwrap();
     println!("cwd absolute: {}", cwd.is_absolute());
     println!("pid nonzero: {}", std::process::id() != 0);
+    // std_detect: cpuid on x86_64, getauxval (from the runtime) on aarch64
+    #[cfg(target_arch = "x86_64")]
+    println!("cpu feature detected: {}", std::arch::is_x86_feature_detected!("sse2"));
+    #[cfg(target_arch = "aarch64")]
+    println!("cpu feature detected: {}", std::arch::is_aarch64_feature_detected!("neon"));
 }

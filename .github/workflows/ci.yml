@@ -32,12 +32,14 @@ jobs:
       - name: Show toolchain
         run: rustup show
 
+      # qemu-user-static registers itself with binfmt_misc, so aarch64
+      # programs can also start aarch64 children (libtest does, per test)
       - name: Install qemu user-mode emulation
         if: matrix.qemu
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user
-          echo "QEMU_AARCH64=$(command -v qemu-aarch64)" >> "$GITHUB_ENV"
+          sudo apt-get install -y qemu-user-static
+          echo "QEMU_AARCH64=$(command -v qemu-aarch64-static)" >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@v2
         with:

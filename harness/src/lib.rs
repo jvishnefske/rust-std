@@ -58,6 +58,19 @@ impl Arch {
     }
 }
 
+impl Arch {
+    /// Whether this arch's programs can start copies of themselves (libtest's
+    /// per-test processes, `current_exe` children): natively, or under qemu
+    /// registered with binfmt_misc.
+    pub fn can_spawn_self(self) -> bool {
+        match self.runner() {
+            Some(None) => true,
+            Some(Some(_)) => Path::new("/proc/sys/fs/binfmt_misc/qemu-aarch64").exists(),
+            None => false,
+        }
+    }
+}
+
 pub fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }

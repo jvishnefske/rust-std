@@ -119,7 +119,10 @@ patched sources if needed, then for x86_64 and for aarch64:
 
 aarch64 programs run natively on an aarch64 host, or under qemu when
 `$QEMU_AARCH64` or `qemu-aarch64` on PATH is available. Otherwise they are
-only built and checked statically. std's in-crate unit tests
+only built and checked statically. std's tests and the smoke example start
+copies of themselves, so under qemu they also need qemu registered with
+binfmt_misc (`qemu-user-static` does that). Without binfmt the tests are
+only built. std's in-crate unit tests
 (`library/std/src/**/tests.rs`) are not run yet.
 
 The Kani proofs run with `cd rt && cargo kani`.

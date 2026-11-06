@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: John Vishnefske <jvishnefske@gmail.com>
+Date: Fri, 6 Nov 2026 15:50:25 -0600
+Subject: [PATCH] std_detect: getauxval without libc on linux-none
+
+std_detect reads the auxiliary vector through libc's getauxval, falling
+back to dlsym and /proc/self/auxv. On linux-none, std's runtime defines
+getauxval (on aarch64, where it is used), so call it directly and drop
+the file fallback, which would need libc's open/read.
+---
+ library/std_detect/src/detect/os/linux/auxvec.rs | 2 ++
+ library/std_detect/src/detect/os/linux/mod.rs    | 8 ++++++++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/library/std_detect/src/detect/os/linux/auxvec.rs b/library/std_detect/src/detect/os/linux/auxvec.rs
+index c0bbc7d..be83c36 100644
+--- a/library/std_detect/src/detect/os/linux/auxvec.rs
++++ b/library/std_detect/src/detect/os/linux/auxvec.rs
+@@ -128,6 +128,8 @@ fn getauxval(key: usize) -> Result<usize, ()> {
+                 any(target_env = "gnu", target_env = "musl", target_env = "ohos"),
+             ),
+             target_os = "android",
++            // linux-none: std's runtime (linux_none_rt) defines getauxval
++            all(target_os = "linux", target_env = ""),
+         ) => {
+             let ffi_getauxval: F = libc::getauxval;
+         }
+diff --git a/library/std_detect/src/detect/os/linux/mod.rs b/library/std_detect/src/detect/os/linux/mod.rs
+index aec94f9..4da7036 100644
+--- a/library/std_detect/src/detect/os/linux/mod.rs
++++ b/library/std_detect/src/detect/os/linux/mod.rs
+@@ -4,6 +4,14 @@ use alloc::vec::Vec;
+ 
+ mod auxvec;
+ 
++// linux-none has no libc to read files with, and needs no /proc fallback:
++// getauxval (from std's runtime) always reads the real auxiliary vector.
++#[cfg(all(target_os = "linux", target_env = ""))]
++fn read_file(orig_path: &str) -> Result<Vec<u8>, alloc::string::String> {
++    Err(alloc::format!("Cannot open file at {orig_path}"))
++}
++
++#[cfg(not(all(target_os = "linux", target_env = "")))]
+ fn read_file(orig_path: &str) -> Result<Vec<u8>, alloc::string::String> {
+     use alloc::format;
+ 

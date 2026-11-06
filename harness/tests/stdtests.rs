@@ -23,8 +23,17 @@ const SKIP: &[&str] = &[
 ];
 
 fn run(arch: Arch) {
-    if arch.runner().is_none() {
-        eprintln!("skipping {}: set QEMU_AARCH64 or put qemu-aarch64 on PATH", arch.name());
+    // libtest runs each test in a child process of the test binary
+    if !arch.can_spawn_self() {
+        eprintln!(
+            "not running std's tests on {}: needs qemu-aarch64, registered with binfmt_misc",
+            arch.name()
+        );
+        // but they must still build and link without libc
+        let out = apps_cargo(arch, &["test", "-p", "stdtests", "-Zpanic-abort-tests", "--no-run"])
+            .output()
+            .expect("failed to run cargo test");
+        assert!(out.status.success(), "std's tests failed to build:\n{}", String::from_utf8_lossy(&out.stderr));
         return;
     }
     let mut cmd = apps_cargo(arch, &["test", "-p", "stdtests", "-Zpanic-abort-tests", "--no-fail-fast"]);

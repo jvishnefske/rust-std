@@ -46,6 +46,7 @@ fn check_args_env(e: &Env) {
     has(&out, r#"after set: "changed""#);
     has(&out, "after remove: true");
     has(&out, "cwd absolute: true");
+    has(&out, "cpu feature detected: true");
 }
 
 fn check_fs(e: &Env, tag: &str) {
@@ -157,7 +158,6 @@ fn check_all(e: &Env, tag: &str) {
     check_collections(e);
     check_panic(e);
     check_stdin(e);
-    check_smoke(e);
 }
 
 fn check_smoke(e: &Env) {
@@ -197,6 +197,12 @@ fn check_arch(arch: Arch) {
     };
     check_static(&e.dir, arch.machine());
     check_all(&e, arch.name());
+    // smoke runs itself as a child process
+    if arch.can_spawn_self() {
+        check_smoke(&e);
+    } else {
+        eprintln!("skipping {} smoke: qemu-aarch64 is not registered with binfmt_misc", arch.name());
+    }
 }
 
 #[test]

@@ -1,0 +1,14 @@
+[package]
+name = "stdtests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "std's own integration tests (library/std/tests), built against rust_std"
+
+[[bin]]
+name = "stdtests"
+test = false
+doctest = false
+
+[dependencies]
+rust_std = { path = ".." }

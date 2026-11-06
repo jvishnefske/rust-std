@@ -1,0 +1,35 @@
+[workspace]
+members = [".", "mem", "harness", "stdtests", "fuzz"]
+# `cargo test` runs the harness, which builds the examples itself: the test
+# profile forces panic=unwind, which rust_std binaries cannot use.
+# Build the examples directly with `cargo build -p rust_std --examples`.
+default-members = ["harness"]
+
+[package]
+name = "rust_std"
+version = "0.1.0"
+edition = "2024"
+description = "A std-compatible runtime for Linux (x86_64, aarch64) that uses raw syscalls instead of libc"
+
+[lib]
+test = false
+doctest = false
+
+[features]
+default = ["global-allocator"]
+# Install the runtime's mmap-based allocator as #[global_allocator].
+global-allocator = []
+
+[dependencies]
+rust_std_mem = { path = "mem" }
+hashbrown = { version = "0.16", default-features = false }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[lints.rust]
+# set by the Kani verifier (`cargo kani`)
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

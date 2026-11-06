@@ -1,0 +1,9 @@
+[package]
+name = "harness"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Host-side tests: builds rust_std's examples and checks their behaviour"
+
+[lib]
+path = "src/lib.rs"

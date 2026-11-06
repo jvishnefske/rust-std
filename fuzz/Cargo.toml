@@ -1,0 +1,14 @@
+[package]
+name = "fuzzee"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "rust_std side of the differential fuzzer: runs fuzz/ops.rs on cases read from stdin"
+
+[[bin]]
+name = "fuzzee"
+test = false
+doctest = false
+
+[dependencies]
+rust_std = { path = ".." }

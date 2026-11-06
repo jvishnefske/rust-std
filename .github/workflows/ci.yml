@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64 natively, plus aarch64 cross-built and run under qemu
+          - name: x86_64 + aarch64/qemu
+            runner: ubuntu-24.04
+            qemu: true
+          # aarch64 natively
+          - name: aarch64
+            runner: ubuntu-24.04-arm
+            qemu: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: ${{ matrix.qemu && 'aarch64-unknown-linux-gnu' || '' }}
+
+      - name: Install qemu user-mode emulation
+        if: matrix.qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+          echo "QEMU_AARCH64=$(command -v qemu-aarch64)" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: |
+          cargo clippy -p rust_std -p rust_std_mem -p harness --all-targets -- -D warnings
+          cargo clippy -p stdtests -p fuzzee -- -D warnings
+
+      - name: Clippy (aarch64 cross)
+        if: matrix.qemu
+        run: cargo clippy -p rust_std -p rust_std_mem --target aarch64-unknown-linux-gnu -- -D warnings
+
+      # examples, std's own test suite, and differential fuzzing against std
+      # (aarch64 under qemu on the x86_64 runner when QEMU_AARCH64 is set)
+      - name: Test
+        run: cargo test
+
+  kani:
+    name: kani proofs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: model-checking/kani-github-action@v1
+        with:
+          kani-version: "0.68.0"
+          args: -p rust_std -p rust_std_mem

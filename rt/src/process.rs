@@ -30,6 +30,7 @@ pub struct Spawn<'a> {
     pub search_path: Option<&'a [u8]>,
     pub argv: *const *const u8,
     pub envp: *const *const u8,
+    pub chroot: Option<*const u8>,
     pub cwd: Option<*const u8>,
     pub stdio: [Fd; 3],
     pub uid: Option<u32>,
@@ -142,6 +143,20 @@ unsafe fn spawn_fork(s: &mut Spawn<'_>, mask: u64) -> SysResult<i32> {
     }
 }
 
+/// Set up the calling process as [`spawn`] would set up a child, then
+/// `execve` in place (`CommandExt::exec`). Returns the errno of whatever
+/// failed; the process may be partly set up by then.
+///
+/// # Safety
+/// As for [`spawn`].
+pub unsafe fn exec(s: &mut Spawn<'_>) -> i32 {
+    let mut mask: u64 = 0;
+    if let Err(e) = unsafe { sys::rt_sigprocmask(sys::SIG_SETMASK, core::ptr::null(), &mut mask) } {
+        return e;
+    }
+    unsafe { child(s, mask) }
+}
+
 fn reap(pid: i32) {
     let mut status = 0;
     while let Err(sys::EINTR) = unsafe { sys::wait4(pid, &mut status, 0) } {}
@@ -153,7 +168,7 @@ unsafe fn child(s: &mut Spawn<'_>, mask: u64) -> i32 {
         Ok(()) => {}
         Err(e) => return e,
     }
-    unsafe { exec(s) }
+    unsafe { execvp(s) }
 }
 
 unsafe fn child_setup(s: &mut Spawn<'_>, mask: u64) -> SysResult<()> {
@@ -182,6 +197,9 @@ unsafe fn child_setup(s: &mut Spawn<'_>, mask: u64) -> SysResult<()> {
         }
         sys::setuid(uid)?;
     }
+    if let Some(dir) = s.chroot {
+        unsafe { sys::chroot(dir)? };
+    }
     if let Some(cwd) = s.cwd {
         unsafe { sys::chdir(cwd)? };
     }
@@ -204,7 +222,7 @@ unsafe fn child_setup(s: &mut Spawn<'_>, mask: u64) -> SysResult<()> {
 }
 
 /// `execve`, or `execvp`'s search of `PATH`.
-unsafe fn exec(s: &Spawn<'_>) -> i32 {
+unsafe fn execvp(s: &Spawn<'_>) -> i32 {
     let Some(path) = s.search_path else {
         return unsafe { sys::execve(s.program, s.argv, s.envp) }.unwrap_err();
     };

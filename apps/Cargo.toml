@@ -1,5 +1,5 @@
 [workspace]
-members = ["hello"]
+members = ["hello", "smoke"]
 resolver = "3"
 
 [profile.dev]

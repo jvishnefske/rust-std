@@ -195,6 +195,7 @@ pub const POLLHUP: i16 = 16;
 pub const FUTEX_WAIT: usize = 0;
 pub const FUTEX_WAKE: usize = 1;
 pub const FUTEX_PRIVATE: usize = 128;
+pub const FUTEX_WAIT_BITSET: usize = 9;
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
@@ -353,6 +354,10 @@ pub fn clock_gettime(clock: usize) -> Timespec {
     unsafe { sc!(nr::CLOCK_GETTIME, clock, &mut ts as *mut Timespec) }.expect("clock_gettime failed");
     ts
 }
+pub const TIMER_ABSTIME: usize = 1;
+pub unsafe fn clock_nanosleep(clock: usize, flags: usize, req: *const Timespec, rem: *mut Timespec) -> SysResult {
+    unsafe { sc!(nr::CLOCK_NANOSLEEP, clock, flags, req, rem) }
+}
 pub fn nanosleep(ts: &Timespec) -> SysResult {
     let mut rem = Timespec::default();
     let mut req = *ts;
@@ -366,6 +371,11 @@ pub fn nanosleep(ts: &Timespec) -> SysResult {
 
 pub unsafe fn futex(addr: *const u32, op: usize, val: u32, timeout: *const Timespec) -> SysResult {
     unsafe { sc!(nr::FUTEX, addr, op, val, timeout, 0, 0) }
+}
+/// `FUTEX_WAIT_BITSET` with every bit set: a private `FUTEX_WAIT` whose
+/// timeout is an absolute `CLOCK_MONOTONIC` time.
+pub unsafe fn futex_wait_abs(addr: *const u32, val: u32, deadline: *const Timespec) -> SysResult {
+    unsafe { sc!(nr::FUTEX, addr, FUTEX_WAIT_BITSET | FUTEX_PRIVATE, val, deadline, 0, !0u32) }
 }
 
 pub fn getpid() -> u32 {
@@ -413,6 +423,10 @@ pub fn exit_thread(code: i32) -> ! {
 }
 pub unsafe fn getrandom(buf: *mut u8, len: usize, flags: u32) -> SysResult {
     unsafe { sc!(nr::GETRANDOM, buf, len, flags) }
+}
+/// Sleep until a signal arrives.
+pub fn pause() {
+    let _ = unsafe { sc!(nr::PPOLL, 0, 0, 0, 0, 8) };
 }
 pub unsafe fn ppoll(fds: *mut PollFd, n: usize, timeout: *const Timespec) -> SysResult {
     unsafe { sc!(nr::PPOLL, fds, n, timeout, 0, 8) }
@@ -466,6 +480,18 @@ pub unsafe fn fchownat(dirfd: i32, path: *const u8, uid: u32, gid: u32, flags: u
 pub unsafe fn utimensat(dirfd: i32, path: *const u8, times: *const Timespec, flags: u32) -> SysResult {
     unsafe { sc!(nr::UTIMENSAT, dirfd, path, times, flags) }
 }
+pub unsafe fn fchmodat2(dirfd: i32, path: *const u8, mode: u32, flags: u32) -> SysResult {
+    unsafe { sc!(nr::FCHMODAT2, dirfd, path, mode, flags) }
+}
+pub unsafe fn chroot(path: *const u8) -> SysResult {
+    unsafe { sc!(nr::CHROOT, path) }
+}
+pub unsafe fn mknodat(dirfd: i32, path: *const u8, mode: u32, dev: u64) -> SysResult {
+    unsafe { sc!(nr::MKNODAT, dirfd, path, mode, dev) }
+}
+pub unsafe fn uname(buf: *mut u8) -> SysResult {
+    unsafe { sc!(nr::UNAME, buf) }
+}
 pub fn fchdir(fd: i32) -> SysResult {
     unsafe { sc!(nr::FCHDIR, fd) }
 }
@@ -498,6 +524,9 @@ pub unsafe fn copy_file_range(fd_in: i32, off_in: *mut i64, fd_out: i32, off_out
 }
 pub unsafe fn waitid(idtype: u32, id: u32, info: *mut u8, options: u32) -> SysResult {
     unsafe { sc!(nr::WAITID, idtype, id, info, options, 0) }
+}
+pub fn pidfd_send_signal(pidfd: i32, sig: i32, flags: u32) -> SysResult {
+    unsafe { sc!(nr::PIDFD_SEND_SIGNAL, pidfd, sig, 0, flags) }
 }
 pub fn pidfd_open(pid: i32, flags: u32) -> SysResult<i32> {
     unsafe { sc!(nr::PIDFD_OPEN, pid, flags).map(|f| f as i32) }

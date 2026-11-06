@@ -6,7 +6,7 @@
 //!   applied as git commits (tags `upstream` and `base` mark the unpatched
 //!   tree, before and after the libc fixup).
 //! - `std-src/libc`: std's libc version, patched to treat linux-none as musl.
-//! - `std-src/linux_none_rt`: a symlink to `rt/`.
+//! - `std-src/library/linux_none_rt`: a symlink to `rt/`.
 //! - `toolchain`: a hard-linked copy of the pinned toolchain whose `rust-src`
 //!   is `std-src`. `-Zbuild-std` reads the std sources from the
 //!   toolchain's sysroot, so this is how cargo finds the patched tree.
@@ -99,8 +99,9 @@ fn sysroot(force: bool) -> io::Result<()> {
     let libc = libc_dir(&library)?;
     copy_tree(&libc, &src.join("libc"), false)?;
     let _ = fs::remove_file(src.join("libc/.cargo-checksum.json"));
-    std::os::unix::fs::symlink(repo().join("rt"), src.join("linux_none_rt"))?;
-    fs::write(src.join(".gitignore"), "/linux_none_rt\n")?;
+    // rt is a member of the library workspace (std-patches adds it)
+    std::os::unix::fs::symlink(repo().join("rt"), src.join("library/linux_none_rt"))?;
+    fs::write(src.join(".gitignore"), "/library/linux_none_rt\n")?;
 
     run(git(&src).args(["init", "-q"]))?;
     run(git(&src).args(["add", "-A"]))?;
@@ -188,8 +189,7 @@ fn toolchain(sysroot: &Path, out: &Path, force: bool) -> io::Result<()> {
         fs::write(&stamp, sysroot.to_string_lossy().as_bytes())?;
     }
     // cargo does not canonicalize the source path, so std's relative paths
-    // (`../libc`, `../linux_none_rt`) resolve inside this directory: link it
-    // as a whole
+    // (`../libc`) resolve inside this directory: link it as a whole
     let src = tc.join("lib/rustlib/src");
     if src.exists() {
         fs::remove_dir_all(&src)?;

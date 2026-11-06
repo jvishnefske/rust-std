@@ -33,6 +33,11 @@ impl<'a> Iter<'a> {
     pub fn new(buf: &'a [u8]) -> Iter<'a> {
         Iter { buf }
     }
+
+    /// Bytes not parsed yet.
+    pub fn remaining(&self) -> usize {
+        self.buf.len()
+    }
 }
 
 impl<'a> Iterator for Iter<'a> {

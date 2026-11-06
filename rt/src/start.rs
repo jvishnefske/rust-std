@@ -144,3 +144,20 @@ pub fn abort() -> ! {
 pub fn write_stderr(s: &[u8]) {
     sys::write_all_raw(2, s)
 }
+
+/// std's backtrace printer walks the stack with libgcc's unwinder API. There
+/// is no unwinder here (panics abort), so every backtrace is empty.
+#[cfg(linux_none)]
+mod unwind_stubs {
+    const URC_END_OF_STACK: i32 = 5;
+
+    #[unsafe(no_mangle)]
+    extern "C" fn _Unwind_Backtrace(_trace: *const u8, _arg: *mut u8) -> i32 {
+        URC_END_OF_STACK
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn _Unwind_GetIP(_ctx: *mut u8) -> usize {
+        0
+    }
+}

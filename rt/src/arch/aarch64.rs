@@ -94,11 +94,14 @@ pub mod nr {
     pub const SIGALTSTACK: usize = 132;
     pub const MADVISE: usize = 233;
     pub const PIDFD_OPEN: usize = 434;
+    pub const PIDFD_SEND_SIGNAL: usize = 424;
     pub const WAITID: usize = 95;
     pub const FSTATFS: usize = 44;
     pub const MREMAP: usize = 216;
     pub const TRUNCATE: usize = 45;
     pub const FCHMODAT2: usize = 452;
+    pub const CHROOT: usize = 51;
+    pub const MKNODAT: usize = 33;
     pub const DUP: usize = 23;
 }
 

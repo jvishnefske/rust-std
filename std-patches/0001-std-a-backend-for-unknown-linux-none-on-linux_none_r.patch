@@ -1,0 +1,4110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: John Vishnefske <jvishnefske@gmail.com>
+Date: Fri, 6 Nov 2026 14:52:41 -0600
+Subject: [PATCH] std: a backend for *-unknown-linux-none on linux_none_rt
+
+std/build.rs sets cfg(linux_none) for linux with an empty target_env,
+and std depends on linux_none_rt there. Each sys subsystem gets a
+linux_none arm ahead of the unix one:
+
+- pal/linux_none: init (stdio fds, SIGPIPE, args), cvt, the futex API
+  and Timespec (unix/time.rs with clock_gettime from rt)
+- alloc, env, io/error (a thread-local errno), is_terminal, random,
+  paths, exit, pipe: small arms or cfg branches in the unix files
+- fd, fs (statx, getdents64), thread (rt::thread, hermit-style TLS
+  destructors), process (unix/common.rs plus rt::process spawning and
+  pidfd), net (socket/mod.rs over a netc shim with libc's signatures)
+- thread_local: the destructor list, run by each thread on exit
+- kernel_copy: none yet; io::copy goes through a buffer
+- os::fd and os::unix::net use rt and the netc shim; os::unix::thread's
+  JoinHandleExt is not implemented (there are no pthreads)
+
+library/Cargo.toml patches libc to ../libc (musl's types for
+linux-none) and makes linux_none_rt a workspace member.
+---
+ library/Cargo.toml                            |    4 +
+ library/std/Cargo.toml                        |    3 +
+ library/std/build.rs                          |    6 +
+ library/std/src/os/fd/owned.rs                |   21 +-
+ library/std/src/os/unix/io/mod.rs             |    3 +
+ library/std/src/os/unix/net/addr.rs           |    4 +
+ library/std/src/os/unix/net/datagram.rs       |    7 +-
+ library/std/src/os/unix/net/listener.rs       |    7 +-
+ library/std/src/os/unix/net/stream.rs         |    7 +-
+ library/std/src/os/unix/net/ucred.rs          |    3 +
+ library/std/src/os/unix/thread.rs             |    4 +
+ library/std/src/sys/alloc/linux_none.rs       |   27 +
+ library/std/src/sys/alloc/mod.rs              |    4 +
+ library/std/src/sys/env/linux_none.rs         |  121 ++
+ library/std/src/sys/env/mod.rs                |    4 +
+ library/std/src/sys/exit.rs                   |    7 +
+ library/std/src/sys/fd/linux_none.rs          |  215 +++
+ library/std/src/sys/fd/mod.rs                 |    4 +
+ library/std/src/sys/fs/linux_none.rs          | 1356 +++++++++++++++++
+ library/std/src/sys/fs/mod.rs                 |    9 +
+ library/std/src/sys/io/error/linux_none.rs    |   93 ++
+ library/std/src/sys/io/error/mod.rs           |    4 +
+ .../std/src/sys/io/is_terminal/linux_none.rs  |    9 +
+ library/std/src/sys/io/kernel_copy/mod.rs     |    3 +
+ library/std/src/sys/io/mod.rs                 |    4 +
+ .../sys/net/connection/socket/linux_none.rs   |  620 ++++++++
+ .../std/src/sys/net/connection/socket/mod.rs  |    4 +
+ .../std/src/sys/net/hostname/linux_none.rs    |   12 +
+ library/std/src/sys/net/hostname/mod.rs       |    4 +
+ library/std/src/sys/pal/linux_none/futex.rs   |   56 +
+ library/std/src/sys/pal/linux_none/mod.rs     |  120 ++
+ library/std/src/sys/pal/mod.rs                |    4 +
+ library/std/src/sys/pal/unix/time.rs          |   19 +-
+ library/std/src/sys/paths/unix.rs             |   28 +-
+ library/std/src/sys/pipe/unix.rs              |    4 +
+ library/std/src/sys/process/unix/common.rs    |    8 +
+ .../std/src/sys/process/unix/linux_none.rs    |  527 +++++++
+ library/std/src/sys/process/unix/mod.rs       |   10 +-
+ library/std/src/sys/random/linux_none.rs      |   34 +
+ library/std/src/sys/random/mod.rs             |    4 +
+ library/std/src/sys/sync/futex/mod.rs         |    3 +
+ library/std/src/sys/thread/linux_none.rs      |  111 ++
+ library/std/src/sys/thread/mod.rs             |    4 +
+ library/std/src/sys/thread_local/mod.rs       |   11 +
+ 45 files changed, 3500 insertions(+), 14 deletions(-)
+ create mode 100644 library/std/src/sys/alloc/linux_none.rs
+ create mode 100644 library/std/src/sys/env/linux_none.rs
+ create mode 100644 library/std/src/sys/fd/linux_none.rs
+ create mode 100644 library/std/src/sys/fs/linux_none.rs
+ create mode 100644 library/std/src/sys/io/error/linux_none.rs
+ create mode 100644 library/std/src/sys/io/is_terminal/linux_none.rs
+ create mode 100644 library/std/src/sys/net/connection/socket/linux_none.rs
+ create mode 100644 library/std/src/sys/net/hostname/linux_none.rs
+ create mode 100644 library/std/src/sys/pal/linux_none/futex.rs
+ create mode 100644 library/std/src/sys/pal/linux_none/mod.rs
+ create mode 100644 library/std/src/sys/process/unix/linux_none.rs
+ create mode 100644 library/std/src/sys/random/linux_none.rs
+ create mode 100644 library/std/src/sys/thread/linux_none.rs
+
+diff --git a/library/Cargo.toml b/library/Cargo.toml
+index 788c990..1ccd7be 100644
+--- a/library/Cargo.toml
++++ b/library/Cargo.toml
+@@ -4,6 +4,8 @@ cargo-features = ["profile-rustflags"]
+ resolver = "1"
+ members = [
+   "std",
++  # linux-none: the runtime std is built on (a link to rt/ in the repository)
++  "linux_none_rt",
+   "sysroot",
+   "coretests",
+   "alloctests",
+@@ -88,3 +90,5 @@ rustc-std-workspace-std = { path = 'rustc-std-workspace-std' }
+ 
+ # See comments in `library/windows-sys/Cargo.toml` for why this is patched
+ windows-sys = { path = 'windows-sys' }
++# linux-none: std's libc, patched to give linux-none musl's types and constants
++libc = { path = '../libc' }
+diff --git a/library/std/Cargo.toml b/library/std/Cargo.toml
+index 06c57c5..5c9bca9 100644
+--- a/library/std/Cargo.toml
++++ b/library/std/Cargo.toml
+@@ -70,6 +70,9 @@ fortanix-sgx-abi = { version = "0.6.1", features = [
+     'rustc-dep-of-std',
+ ], public = true }
+ 
++[target.'cfg(all(target_os = "linux", target_env = ""))'.dependencies]
++linux_none_rt = { path = "../linux_none_rt", features = ['rustc-dep-of-std'] }
++
+ [target.'cfg(target_os = "motor")'.dependencies]
+ moto-rt = { version = "0.17", features = ['rustc-dep-of-std'], public = true }
+ 
+diff --git a/library/std/build.rs b/library/std/build.rs
+index 98856b5..b9488c1 100644
+--- a/library/std/build.rs
++++ b/library/std/build.rs
+@@ -9,6 +9,12 @@ fn main() {
+     let target_env = env::var("CARGO_CFG_TARGET_ENV").expect("CARGO_CFG_TARGET_ENV was not set");
+ 
+     println!("cargo:rustc-check-cfg=cfg(netbsd10)");
++
++    // *-unknown-linux-none: the std backend in sys/pal/linux_none, on linux_none_rt
++    println!("cargo:rustc-check-cfg=cfg(linux_none)");
++    if target_os == "linux" && target_env.is_empty() {
++        println!("cargo:rustc-cfg=linux_none");
++    }
+     if target_os == "netbsd" && env::var("RUSTC_STD_NETBSD10").is_ok() {
+         println!("cargo:rustc-cfg=netbsd10");
+     }
+diff --git a/library/std/src/os/fd/owned.rs b/library/std/src/os/fd/owned.rs
+index 4ed5c43..c5144e5 100644
+--- a/library/std/src/os/fd/owned.rs
++++ b/library/std/src/os/fd/owned.rs
+@@ -107,7 +107,8 @@ impl BorrowedFd<'_> {
+         all(target_arch = "wasm32", not(target_os = "emscripten")),
+         target_os = "hermit",
+         target_os = "trusty",
+-        target_os = "motor"
++        target_os = "motor",
++        linux_none
+     )))]
+     #[stable(feature = "io_safety", since = "1.63.0")]
+     pub fn try_clone_to_owned(&self) -> io::Result<OwnedFd> {
+@@ -141,6 +142,17 @@ impl BorrowedFd<'_> {
+         Err(io::Error::UNSUPPORTED_PLATFORM)
+     }
+ 
++    /// Creates a new `OwnedFd` instance that shares the same underlying file
++    /// description as the existing `BorrowedFd` instance.
++    #[cfg(linux_none)]
++    #[stable(feature = "io_safety", since = "1.63.0")]
++    pub fn try_clone_to_owned(&self) -> io::Result<OwnedFd> {
++        use linux_none_rt::sys;
++        // Avoid using file descriptors below 3 as they are used for stdio
++        let fd = cvt(sys::fcntl(self.as_raw_fd(), sys::F_DUPFD_CLOEXEC, 3))?;
++        Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
++    }
++
+     /// Creates a new `OwnedFd` instance that shares the same underlying file
+     /// description as the existing `BorrowedFd` instance.
+     #[cfg(target_os = "motor")]
+@@ -212,13 +224,18 @@ impl Drop for OwnedFd {
+             // not-POSIX-compliant implementation, the consequences could be really bad since we may
+             // close the wrong FD. Helpful link to an epic discussion by POSIX workgroup that led to
+             // the latest POSIX wording: http://austingroupbugs.net/view.php?id=529
+-            #[cfg(not(target_os = "hermit"))]
++            #[cfg(not(any(target_os = "hermit", linux_none)))]
+             {
+                 #[cfg(unix)]
+                 crate::sys::fs::debug_assert_fd_is_open(self.fd.as_inner());
+ 
+                 let _ = libc::close(self.fd.as_inner());
+             }
++            #[cfg(linux_none)]
++            {
++                crate::sys::fs::debug_assert_fd_is_open(self.fd.as_inner());
++                let _ = linux_none_rt::sys::close(self.fd.as_inner());
++            }
+             #[cfg(target_os = "hermit")]
+             let _ = hermit_abi::close(self.fd.as_inner());
+         }
+diff --git a/library/std/src/os/unix/io/mod.rs b/library/std/src/os/unix/io/mod.rs
+index 4afb8ff..1d589cf 100644
+--- a/library/std/src/os/unix/io/mod.rs
++++ b/library/std/src/os/unix/io/mod.rs
+@@ -215,6 +215,9 @@ fn replace_stdio_fd(this: BorrowedFd<'_>, other: OwnedFd) -> io::Result<()> {
+             cvt(unsafe { libc::__wasilibc_fd_renumber(other.as_raw_fd(), this.as_raw_fd()) })
+                 .map(|_| ())
+         }
++        linux_none => {
++            cvt(linux_none_rt::sys::dup3(other.as_raw_fd(), this.as_raw_fd(), 0)).map(|_| ())
++        }
+         not(any(
+             all(target_arch = "wasm32", not(target_os = "emscripten")),
+             target_os = "hermit",
+diff --git a/library/std/src/os/unix/net/addr.rs b/library/std/src/os/unix/net/addr.rs
+index 3daddc2..1e61349 100644
+--- a/library/std/src/os/unix/net/addr.rs
++++ b/library/std/src/os/unix/net/addr.rs
+@@ -4,7 +4,11 @@ use crate::ffi::OsStr;
+ use crate::os::net::linux_ext;
+ use crate::os::unix::ffi::OsStrExt;
+ use crate::path::Path;
++#[cfg(not(linux_none))]
+ use crate::sys::cvt;
++// linux-none: no libc, but a socket layer with its signatures
++#[cfg(linux_none)]
++use crate::sys::net::{cvt, netc as libc};
+ use crate::{fmt, io, mem, ptr};
+ 
+ // FIXME(#43348): Make libc adapt #[doc(cfg(...))] so we don't need these fake definitions here?
+diff --git a/library/std/src/os/unix/net/datagram.rs b/library/std/src/os/unix/net/datagram.rs
+index e03ecd7..89abfc1 100644
+--- a/library/std/src/os/unix/net/datagram.rs
++++ b/library/std/src/os/unix/net/datagram.rs
+@@ -23,7 +23,12 @@ use crate::net::Shutdown;
+ use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+ use crate::path::Path;
+ use crate::sys::net::Socket;
+-use crate::sys::{AsInner, FromInner, IntoInner, cvt};
++use crate::sys::{AsInner, FromInner, IntoInner};
++#[cfg(not(linux_none))]
++use crate::sys::cvt;
++// linux-none: no libc, but a socket layer with its signatures
++#[cfg(linux_none)]
++use crate::sys::net::{cvt, netc as libc};
+ use crate::time::Duration;
+ use crate::{fmt, io};
+ #[cfg(not(any(
+diff --git a/library/std/src/os/unix/net/listener.rs b/library/std/src/os/unix/net/listener.rs
+index b7f8d25..4e52aa5 100644
+--- a/library/std/src/os/unix/net/listener.rs
++++ b/library/std/src/os/unix/net/listener.rs
+@@ -2,7 +2,12 @@ use super::{SocketAddr, UnixStream, sockaddr_un};
+ use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+ use crate::path::Path;
+ use crate::sys::net::Socket;
+-use crate::sys::{AsInner, FromInner, IntoInner, cvt};
++use crate::sys::{AsInner, FromInner, IntoInner};
++#[cfg(not(linux_none))]
++use crate::sys::cvt;
++// linux-none: no libc, but a socket layer with its signatures
++#[cfg(linux_none)]
++use crate::sys::net::{cvt, netc as libc};
+ use crate::{fmt, io, mem};
+ 
+ /// A structure representing a Unix domain socket server.
+diff --git a/library/std/src/os/unix/net/stream.rs b/library/std/src/os/unix/net/stream.rs
+index 31a908d..084dfe4 100644
+--- a/library/std/src/os/unix/net/stream.rs
++++ b/library/std/src/os/unix/net/stream.rs
+@@ -43,7 +43,12 @@ use crate::net::Shutdown;
+ use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+ use crate::path::Path;
+ use crate::sys::net::Socket;
+-use crate::sys::{AsInner, FromInner, cvt};
++use crate::sys::{AsInner, FromInner};
++#[cfg(not(linux_none))]
++use crate::sys::cvt;
++// linux-none: no libc, but a socket layer with its signatures
++#[cfg(linux_none)]
++use crate::sys::net::{cvt, netc as libc};
+ use crate::time::Duration;
+ 
+ /// A Unix stream socket.
+diff --git a/library/std/src/os/unix/net/ucred.rs b/library/std/src/os/unix/net/ucred.rs
+index 36b67cb..7baa7d5 100644
+--- a/library/std/src/os/unix/net/ucred.rs
++++ b/library/std/src/os/unix/net/ucred.rs
+@@ -39,7 +39,10 @@ pub(super) use self::impl_linux::peer_cred;
+ 
+ #[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin"))]
+ mod impl_linux {
++    #[cfg(not(linux_none))]
+     use libc::{SO_PEERCRED, SOL_SOCKET, c_void, getsockopt, socklen_t, ucred};
++    #[cfg(linux_none)]
++    use crate::sys::net::netc::{SO_PEERCRED, SOL_SOCKET, c_void, getsockopt, socklen_t, ucred};
+ 
+     use super::UCred;
+     use crate::io;
+diff --git a/library/std/src/os/unix/thread.rs b/library/std/src/os/unix/thread.rs
+index c19ccaf..197051b 100644
+--- a/library/std/src/os/unix/thread.rs
++++ b/library/std/src/os/unix/thread.rs
+@@ -6,7 +6,9 @@
+ 
+ #[allow(deprecated)]
+ use crate::os::unix::raw::pthread_t;
++#[cfg(not(linux_none))]
+ use crate::sys::{AsInner, IntoInner};
++#[cfg(not(linux_none))]
+ use crate::thread::JoinHandle;
+ 
+ #[stable(feature = "thread_extensions", since = "1.9.0")]
+@@ -29,6 +31,8 @@ pub trait JoinHandleExt {
+     fn into_pthread_t(self) -> RawPthread;
+ }
+ 
++// linux-none has no pthreads to hand out
++#[cfg(not(linux_none))]
+ #[stable(feature = "thread_extensions", since = "1.9.0")]
+ impl<T> JoinHandleExt for JoinHandle<T> {
+     // This is an int2ptr cast on some platforms (e.g., *-musl) where RawPthread
+diff --git a/library/std/src/sys/alloc/linux_none.rs b/library/std/src/sys/alloc/linux_none.rs
+new file mode 100644
+index 0000000..a9c491e
+--- /dev/null
++++ b/library/std/src/sys/alloc/linux_none.rs
+@@ -0,0 +1,27 @@
++//! `System` on linux-none: `linux_none_rt`'s mmap-backed allocator.
++
++use linux_none_rt::alloc::Allocator;
++
++use crate::alloc::{GlobalAlloc, Layout};
++
++static ALLOCATOR: Allocator = Allocator::new();
++
++#[inline]
++pub unsafe fn alloc(layout: Layout) -> *mut u8 {
++    unsafe { ALLOCATOR.alloc(layout) }
++}
++
++#[inline]
++pub unsafe fn alloc_zeroed(layout: Layout) -> *mut u8 {
++    unsafe { ALLOCATOR.alloc_zeroed(layout) }
++}
++
++#[inline]
++pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
++    unsafe { ALLOCATOR.dealloc(ptr, layout) }
++}
++
++#[inline]
++pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
++    unsafe { ALLOCATOR.realloc(ptr, layout, new_size) }
++}
+diff --git a/library/std/src/sys/alloc/mod.rs b/library/std/src/sys/alloc/mod.rs
+index 66a2c3b..52e4138 100644
+--- a/library/std/src/sys/alloc/mod.rs
++++ b/library/std/src/sys/alloc/mod.rs
+@@ -64,6 +64,10 @@ unsafe fn realloc_fallback(ptr: *mut u8, old_layout: Layout, new_size: usize) ->
+ }
+ 
+ cfg_select! {
++    linux_none => {
++        mod linux_none;
++        use linux_none as imp;
++    }
+     any(target_family = "unix", target_os = "wasi", target_os = "teeos", target_os = "trusty") => {
+         mod unix;
+         use unix as imp;
+diff --git a/library/std/src/sys/env/linux_none.rs b/library/std/src/sys/env/linux_none.rs
+new file mode 100644
+index 0000000..1bbca62
+--- /dev/null
++++ b/library/std/src/sys/env/linux_none.rs
+@@ -0,0 +1,121 @@
++//! The environment on linux-none: std owns `environ`. It starts as the array
++//! the kernel passed to the process; `setenv`/`unsetenv` replace it with a
++//! fresh array under `ENV_LOCK`. Replaced strings are leaked, as libc does,
++//! so that a `getenv` result copied out under the read lock stays valid.
++
++use core::slice::memchr;
++
++use libc::c_char;
++
++pub use super::common::Env;
++use crate::ffi::{CStr, CString, OsStr, OsString};
++use crate::io;
++use crate::os::unix::prelude::*;
++use crate::ptr;
++use crate::sync::{PoisonError, RwLock};
++
++static ENV_LOCK: RwLock<()> = RwLock::new(());
++
++/// The current `environ` array, once it has been modified (null before).
++static mut ENVIRON: *const *const c_char = ptr::null();
++/// The array `ENVIRON` points to, when std allocated it.
++static mut OWNED: Vec<*const c_char> = Vec::new();
++
++/// The null-terminated `KEY=VALUE` array, as libc's `environ`. Read it only
++/// while holding [`env_read_lock`].
++pub fn environ() -> *const *const c_char {
++    unsafe {
++        let e = ENVIRON;
++        if e.is_null() { linux_none_rt::start::envp().cast() } else { e }
++    }
++}
++
++pub fn env_read_lock() -> impl Drop {
++    ENV_LOCK.read().unwrap_or_else(PoisonError::into_inner)
++}
++
++fn entries() -> impl Iterator<Item = &'static [u8]> {
++    let mut p = environ();
++    crate::iter::from_fn(move || unsafe {
++        if p.is_null() || (*p).is_null() {
++            return None;
++        }
++        let s = CStr::from_ptr(*p).to_bytes();
++        p = p.add(1);
++        Some(s)
++    })
++}
++
++fn parse(input: &[u8]) -> Option<(&[u8], &[u8])> {
++    // a leading `=` is part of the key (as on Windows' per-drive variables)
++    if input.is_empty() {
++        return None;
++    }
++    let pos = memchr::memchr(b'=', &input[1..]).map(|p| p + 1)?;
++    Some((&input[..pos], &input[pos + 1..]))
++}
++
++pub fn env() -> Env {
++    let _guard = env_read_lock();
++    let result = entries()
++        .filter_map(parse)
++        .map(|(k, v)| (OsStringExt::from_vec(k.to_vec()), OsStringExt::from_vec(v.to_vec())))
++        .collect();
++    Env::new(result)
++}
++
++pub fn getenv(k: &OsStr) -> Option<OsString> {
++    let k = k.as_bytes();
++    let _guard = env_read_lock();
++    entries().filter_map(parse).find(|(key, _)| *key == k).map(|(_, v)| OsStringExt::from_vec(v.to_vec()))
++}
++
++fn invalid_key(k: &[u8]) -> bool {
++    k.is_empty() || k.contains(&b'=') || k.contains(&0)
++}
++
++/// Replace the variable `k` with `new` (`KEY=VALUE`), or remove it.
++fn update(k: &[u8], new: Option<CString>) {
++    let _guard = ENV_LOCK.write().unwrap_or_else(PoisonError::into_inner);
++    let mut v: Vec<*const c_char> = Vec::new();
++    let mut p = environ();
++    unsafe {
++        while !p.is_null() && !(*p).is_null() {
++            let entry = CStr::from_ptr(*p).to_bytes();
++            if !parse(entry).is_some_and(|(key, _)| key == k) {
++                v.push(*p);
++            }
++            p = p.add(1);
++        }
++    }
++    if let Some(new) = new {
++        v.push(new.into_raw());
++    }
++    v.push(ptr::null());
++    unsafe {
++        ENVIRON = v.as_ptr();
++        *&raw mut OWNED = v;
++    }
++}
++
++pub unsafe fn setenv(k: &OsStr, v: &OsStr) -> io::Result<()> {
++    let (k, v) = (k.as_bytes(), v.as_bytes());
++    if invalid_key(k) || v.contains(&0) {
++        return Err(io::Error::from_raw_os_error(libc::EINVAL));
++    }
++    let mut kv = Vec::with_capacity(k.len() + v.len() + 1);
++    kv.extend_from_slice(k);
++    kv.push(b'=');
++    kv.extend_from_slice(v);
++    update(k, Some(CString::new(kv).unwrap()));
++    Ok(())
++}
++
++pub unsafe fn unsetenv(k: &OsStr) -> io::Result<()> {
++    let k = k.as_bytes();
++    if invalid_key(k) {
++        return Err(io::Error::from_raw_os_error(libc::EINVAL));
++    }
++    update(k, None);
++    Ok(())
++}
+diff --git a/library/std/src/sys/env/mod.rs b/library/std/src/sys/env/mod.rs
+index 8985651..3bd67b2 100644
+--- a/library/std/src/sys/env/mod.rs
++++ b/library/std/src/sys/env/mod.rs
+@@ -15,6 +15,10 @@
+ mod common;
+ 
+ cfg_select! {
++    linux_none => {
++        mod linux_none;
++        pub use linux_none::*;
++    }
+     target_family = "unix" => {
+         mod unix;
+         pub use unix::*;
+diff --git a/library/std/src/sys/exit.rs b/library/std/src/sys/exit.rs
+index b9ebe2d..881c535 100644
+--- a/library/std/src/sys/exit.rs
++++ b/library/std/src/sys/exit.rs
+@@ -55,6 +55,9 @@ cfg_select! {
+                     // Pause until the process exits.
+                     loop {
+                         // Safety: libc::pause is safe to call.
++                        #[cfg(linux_none)]
++                        linux_none_rt::sys::pause();
++                        #[cfg(not(linux_none))]
+                         unsafe {
+                             libc::pause();
+                         }
+@@ -94,6 +97,10 @@ cfg_select! {
+ pub fn exit(code: i32) -> ! {
+     cfg_select! {
+         target_os = "hermit" => unsafe { hermit_abi::exit(code) },
++        linux_none => {
++            unique_thread_exit();
++            linux_none_rt::start::exit(code)
++        },
+         target_os = "linux" => unsafe {
+             unique_thread_exit();
+             libc::exit(code)
+diff --git a/library/std/src/sys/fd/linux_none.rs b/library/std/src/sys/fd/linux_none.rs
+new file mode 100644
+index 0000000..8ad4635
+--- /dev/null
++++ b/library/std/src/sys/fd/linux_none.rs
+@@ -0,0 +1,215 @@
++//! `FileDesc` on linux-none: fd/unix.rs on `linux_none_rt` syscalls.
++
++#![unstable(reason = "not public", issue = "none", feature = "fd")]
++
++#[cfg(test)]
++#[path = "unix/tests.rs"]
++mod tests;
++
++use linux_none_rt::sys::{self, IoVec};
++
++use crate::cmp;
++use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read};
++use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
++use crate::sys::{AsInner, FromInner, IntoInner, cvt};
++
++#[derive(Debug)]
++pub struct FileDesc(OwnedFd);
++
++// Reads and writes larger than `ssize_t::MAX` are unspecified.
++const READ_LIMIT: usize = isize::MAX as usize;
++
++const fn max_iov() -> usize {
++    libc::UIO_MAXIOV as usize
++}
++
++// `IoSlice` and `IoSliceMut` are ABI-compatible with `struct iovec` on unix
++fn iov(bufs: &[IoSlice<'_>]) -> (*const IoVec, usize) {
++    (bufs.as_ptr().cast(), cmp::min(bufs.len(), max_iov()))
++}
++
++fn iov_mut(bufs: &mut [IoSliceMut<'_>]) -> (*const IoVec, usize) {
++    (bufs.as_mut_ptr().cast_const().cast(), cmp::min(bufs.len(), max_iov()))
++}
++
++impl FileDesc {
++    #[inline]
++    pub fn try_clone(&self) -> io::Result<Self> {
++        self.duplicate()
++    }
++
++    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
++        let len = cmp::min(buf.len(), READ_LIMIT);
++        cvt(unsafe { sys::read(self.as_raw_fd(), buf.as_mut_ptr(), len) })
++    }
++
++    pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
++        let (p, n) = iov_mut(bufs);
++        cvt(unsafe { sys::readv(self.as_raw_fd(), p, n) })
++    }
++
++    #[inline]
++    pub fn is_read_vectored(&self) -> bool {
++        true
++    }
++
++    pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
++        let mut me = self;
++        (&mut me).read_to_end(buf)
++    }
++
++    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
++        let len = cmp::min(buf.len(), READ_LIMIT);
++        // EINVAL if offset + count overflows
++        cvt(unsafe { sys::pread(self.as_raw_fd(), buf.as_mut_ptr(), len, offset) })
++    }
++
++    pub fn read_buf(&self, mut cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
++        // SAFETY: `cursor.as_mut()` starts with `cursor.capacity()` writable bytes
++        let ret = cvt(unsafe {
++            sys::read(
++                self.as_raw_fd(),
++                cursor.as_mut().as_mut_ptr().cast::<u8>(),
++                cmp::min(cursor.capacity(), READ_LIMIT),
++            )
++        })?;
++
++        // SAFETY: `ret` bytes were written to the initialized portion of the buffer
++        unsafe {
++            cursor.advance(ret);
++        }
++        Ok(())
++    }
++
++    pub fn read_buf_at(&self, mut cursor: BorrowedCursor<'_, u8>, offset: u64) -> io::Result<()> {
++        // SAFETY: `cursor.as_mut()` starts with `cursor.capacity()` writable bytes
++        let ret = cvt(unsafe {
++            sys::pread(
++                self.as_raw_fd(),
++                cursor.as_mut().as_mut_ptr().cast::<u8>(),
++                cmp::min(cursor.capacity(), READ_LIMIT),
++                offset,
++            )
++        })?;
++
++        // SAFETY: `ret` bytes were written to the initialized portion of the buffer
++        unsafe {
++            cursor.advance(ret);
++        }
++        Ok(())
++    }
++
++    pub fn read_vectored_at(&self, bufs: &mut [IoSliceMut<'_>], offset: u64) -> io::Result<usize> {
++        let (p, n) = iov_mut(bufs);
++        cvt(unsafe { sys::preadv(self.as_raw_fd(), p, n, offset) })
++    }
++
++    pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
++        let len = cmp::min(buf.len(), READ_LIMIT);
++        cvt(unsafe { sys::write(self.as_raw_fd(), buf.as_ptr(), len) })
++    }
++
++    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
++        let (p, n) = iov(bufs);
++        cvt(unsafe { sys::writev(self.as_raw_fd(), p, n) })
++    }
++
++    #[inline]
++    pub fn is_write_vectored(&self) -> bool {
++        true
++    }
++
++    pub fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
++        let len = cmp::min(buf.len(), READ_LIMIT);
++        cvt(unsafe { sys::pwrite(self.as_raw_fd(), buf.as_ptr(), len, offset) })
++    }
++
++    pub fn write_vectored_at(&self, bufs: &[IoSlice<'_>], offset: u64) -> io::Result<usize> {
++        let (p, n) = iov(bufs);
++        cvt(unsafe { sys::pwritev(self.as_raw_fd(), p, n, offset) })
++    }
++
++    pub fn set_cloexec(&self) -> io::Result<()> {
++        let fd = self.as_raw_fd();
++        let previous = cvt(sys::fcntl(fd, sys::F_GETFD, 0))?;
++        let new = previous | sys::FD_CLOEXEC;
++        if new != previous {
++            cvt(sys::fcntl(fd, sys::F_SETFD, new))?;
++        }
++        Ok(())
++    }
++
++    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
++        let v = nonblocking as libc::c_int;
++        cvt(unsafe { sys::ioctl(self.as_raw_fd(), libc::FIONBIO as usize, &v as *const _ as usize) })?;
++        Ok(())
++    }
++
++    #[inline]
++    pub fn duplicate(&self) -> io::Result<FileDesc> {
++        Ok(Self(self.0.try_clone()?))
++    }
++}
++
++impl<'a> Read for &'a FileDesc {
++    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
++        (**self).read(buf)
++    }
++
++    fn read_buf(&mut self, cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
++        (**self).read_buf(cursor)
++    }
++
++    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
++        (**self).read_vectored(bufs)
++    }
++
++    #[inline]
++    fn is_read_vectored(&self) -> bool {
++        (**self).is_read_vectored()
++    }
++}
++
++impl AsInner<OwnedFd> for FileDesc {
++    #[inline]
++    fn as_inner(&self) -> &OwnedFd {
++        &self.0
++    }
++}
++
++impl IntoInner<OwnedFd> for FileDesc {
++    fn into_inner(self) -> OwnedFd {
++        self.0
++    }
++}
++
++impl FromInner<OwnedFd> for FileDesc {
++    fn from_inner(owned_fd: OwnedFd) -> Self {
++        Self(owned_fd)
++    }
++}
++
++impl AsFd for FileDesc {
++    fn as_fd(&self) -> BorrowedFd<'_> {
++        self.0.as_fd()
++    }
++}
++
++impl AsRawFd for FileDesc {
++    #[inline]
++    fn as_raw_fd(&self) -> RawFd {
++        self.0.as_raw_fd()
++    }
++}
++
++impl IntoRawFd for FileDesc {
++    fn into_raw_fd(self) -> RawFd {
++        self.0.into_raw_fd()
++    }
++}
++
++impl FromRawFd for FileDesc {
++    unsafe fn from_raw_fd(raw_fd: RawFd) -> Self {
++        Self(unsafe { FromRawFd::from_raw_fd(raw_fd) })
++    }
++}
+diff --git a/library/std/src/sys/fd/mod.rs b/library/std/src/sys/fd/mod.rs
+index 02d61a6..5c62326 100644
+--- a/library/std/src/sys/fd/mod.rs
++++ b/library/std/src/sys/fd/mod.rs
+@@ -3,6 +3,10 @@
+ #![forbid(unsafe_op_in_unsafe_fn)]
+ 
+ cfg_select! {
++    linux_none => {
++        mod linux_none;
++        pub use linux_none::*;
++    }
+     any(target_family = "unix", target_os = "wasi") => {
+         mod unix;
+         pub use unix::*;
+diff --git a/library/std/src/sys/fs/linux_none.rs b/library/std/src/sys/fs/linux_none.rs
+new file mode 100644
+index 0000000..4c3ce39
+--- /dev/null
++++ b/library/std/src/sys/fs/linux_none.rs
+@@ -0,0 +1,1356 @@
++//! Files on linux-none: fs/unix.rs for Linux, on `linux_none_rt` syscalls.
++//! Metadata comes from `statx`, directories are read with `getdents64`, and
++//! `canonicalize` asks `/proc/self/fd` (as musl's `realpath` once did).
++
++#![allow(nonstandard_style)]
++
++#[cfg(test)]
++#[path = "unix/tests.rs"]
++mod tests;
++
++use libc::{c_int, mode_t, stat64};
++use linux_none_rt::{dirent, sys};
++
++use crate::ffi::{CStr, CString, OsStr, OsString};
++use crate::fmt::{self, Write as _};
++use crate::fs::TryLockError;
++use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, SeekFrom};
++use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
++use crate::os::unix::prelude::*;
++use crate::path::{Path, PathBuf};
++use crate::sync::Arc;
++use crate::sys::fd::FileDesc;
++pub use crate::sys::fs::common::exists;
++use crate::sys::helpers::run_path_with_cstr;
++use crate::sys::time::SystemTime;
++use crate::sys::{AsInner, AsInnerMut, FromInner, IntoInner, cvt, cvt_r};
++use crate::{fs, mem, ptr};
++
++pub struct File(FileDesc);
++
++#[derive(Clone)]
++pub struct FileAttr {
++    stat: stat64,
++    /// birth time, when the filesystem reports one
++    btime: Option<sys::StatxTimestamp>,
++}
++
++/// `statx`, translated to the `stat64` that `MetadataExt` exposes.
++fn statx(dirfd: c_int, path: &CStr, flags: u32) -> io::Result<FileAttr> {
++    let mut buf = sys::Statx::default();
++    cvt(unsafe {
++        sys::statx(
++            dirfd,
++            path.as_ptr().cast(),
++            flags | AT_STATX_SYNC_AS_STAT,
++            sys::STATX_BASIC_STATS | sys::STATX_BTIME,
++            &mut buf,
++        )
++    })?;
++
++    // We cannot fill `stat64` exhaustively because of private padding fields.
++    let mut stat: stat64 = unsafe { mem::zeroed() };
++    stat.st_dev = libc::makedev(buf.dev_major, buf.dev_minor) as _;
++    stat.st_ino = buf.ino as _;
++    stat.st_nlink = buf.nlink as _;
++    stat.st_mode = buf.mode as mode_t;
++    stat.st_uid = buf.uid;
++    stat.st_gid = buf.gid;
++    stat.st_rdev = libc::makedev(buf.rdev_major, buf.rdev_minor) as _;
++    stat.st_size = buf.size as _;
++    stat.st_blksize = buf.blksize as _;
++    stat.st_blocks = buf.blocks as _;
++    stat.st_atime = buf.atime.sec as _;
++    stat.st_atime_nsec = buf.atime.nsec as _;
++    stat.st_mtime = buf.mtime.sec as _;
++    stat.st_mtime_nsec = buf.mtime.nsec as _;
++    stat.st_ctime = buf.ctime.sec as _;
++    stat.st_ctime_nsec = buf.ctime.nsec as _;
++    let btime = (buf.mask & sys::STATX_BTIME != 0).then_some(buf.btime);
++    Ok(FileAttr { stat, btime })
++}
++
++const AT_STATX_SYNC_AS_STAT: u32 = 0;
++
++// all DirEntry's will have a reference to this struct
++struct InnerReadDir {
++    dirp: DirStream,
++    root: PathBuf,
++}
++
++/// An open directory, read with `getdents64`.
++struct DirStream(OwnedFd);
++
++pub struct ReadDir {
++    inner: Arc<InnerReadDir>,
++    buf: Vec<u8>,
++    /// the parsed part of `buf` ends at `pos`; `len` bytes are valid
++    pos: usize,
++    len: usize,
++    end_of_stream: bool,
++}
++
++impl ReadDir {
++    fn new(inner: InnerReadDir) -> Self {
++        Self { inner: Arc::new(inner), buf: vec![0; 8192], pos: 0, len: 0, end_of_stream: false }
++    }
++}
++
++fn debug_path_fd<'a, 'b>(
++    fd: c_int,
++    f: &'a mut fmt::Formatter<'b>,
++    name: &str,
++) -> fmt::DebugStruct<'a, 'b> {
++    let mut b = f.debug_struct(name);
++
++    fn get_mode(fd: c_int) -> Option<(bool, bool)> {
++        let mode = sys::fcntl(fd, sys::F_GETFL, 0).ok()? as c_int;
++        match mode & libc::O_ACCMODE {
++            libc::O_RDONLY => Some((true, false)),
++            libc::O_RDWR => Some((true, true)),
++            libc::O_WRONLY => Some((false, true)),
++            _ => None,
++        }
++    }
++
++    b.field("fd", &fd);
++    if let Some(path) = get_path_from_fd(fd) {
++        b.field("path", &path);
++    }
++    if let Some((read, write)) = get_mode(fd) {
++        b.field("read", &read).field("write", &write);
++    }
++
++    b
++}
++
++fn get_path_from_fd(fd: c_int) -> Option<PathBuf> {
++    let mut p = PathBuf::from("/proc/self/fd");
++    p.push(&fd.to_string());
++    run_path_with_cstr(&p, &readlink).ok()
++}
++
++pub struct DirEntry {
++    dir: Arc<InnerReadDir>,
++    entry: dirent64_min,
++    name: CString,
++}
++
++struct dirent64_min {
++    d_ino: u64,
++    d_type: u8,
++}
++
++#[derive(Clone)]
++pub struct OpenOptions {
++    // generic
++    read: bool,
++    write: bool,
++    append: bool,
++    truncate: bool,
++    create: bool,
++    create_new: bool,
++    // system-specific
++    custom_flags: i32,
++    mode: mode_t,
++}
++
++#[derive(Clone, PartialEq, Eq)]
++pub struct FilePermissions {
++    mode: mode_t,
++}
++
++#[derive(Copy, Clone, Debug, Default)]
++pub struct FileTimes {
++    accessed: Option<SystemTime>,
++    modified: Option<SystemTime>,
++}
++
++#[derive(Copy, Clone, Eq)]
++pub struct FileType {
++    mode: mode_t,
++}
++
++impl PartialEq for FileType {
++    fn eq(&self, other: &Self) -> bool {
++        self.masked() == other.masked()
++    }
++}
++
++impl core::hash::Hash for FileType {
++    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
++        self.masked().hash(state);
++    }
++}
++
++pub struct DirBuilder {
++    mode: mode_t,
++}
++
++#[derive(Copy, Clone)]
++struct Mode(mode_t);
++
++impl FileAttr {
++    pub fn size(&self) -> u64 {
++        self.stat.st_size as u64
++    }
++    pub fn perm(&self) -> FilePermissions {
++        FilePermissions { mode: (self.stat.st_mode as mode_t) }
++    }
++
++    pub fn file_type(&self) -> FileType {
++        FileType { mode: self.stat.st_mode as mode_t }
++    }
++
++    pub fn modified(&self) -> io::Result<SystemTime> {
++        SystemTime::new(self.stat.st_mtime as i64, self.stat.st_mtime_nsec as i64)
++    }
++
++    pub fn accessed(&self) -> io::Result<SystemTime> {
++        SystemTime::new(self.stat.st_atime as i64, self.stat.st_atime_nsec as i64)
++    }
++
++    pub fn created(&self) -> io::Result<SystemTime> {
++        match &self.btime {
++            Some(t) => SystemTime::new(t.sec, t.nsec as i64),
++            None => Err(io::const_error!(
++                io::ErrorKind::Unsupported,
++                "creation time is not available for the filesystem",
++            )),
++        }
++    }
++}
++
++impl AsInner<stat64> for FileAttr {
++    #[inline]
++    fn as_inner(&self) -> &stat64 {
++        &self.stat
++    }
++}
++
++impl FilePermissions {
++    pub fn readonly(&self) -> bool {
++        // check if any class (owner, group, others) has write permission
++        self.mode & 0o222 == 0
++    }
++
++    pub fn set_readonly(&mut self, readonly: bool) {
++        if readonly {
++            // remove write permission for all classes; equivalent to `chmod a-w <file>`
++            self.mode &= !0o222;
++        } else {
++            // add write permission for all classes; equivalent to `chmod a+w <file>`
++            self.mode |= 0o222;
++        }
++    }
++    pub fn mode(&self) -> u32 {
++        self.mode as u32
++    }
++}
++
++impl FileTimes {
++    pub fn set_accessed(&mut self, t: SystemTime) {
++        self.accessed = Some(t);
++    }
++
++    pub fn set_modified(&mut self, t: SystemTime) {
++        self.modified = Some(t);
++    }
++}
++
++impl FileType {
++    pub fn is_dir(&self) -> bool {
++        self.is(libc::S_IFDIR)
++    }
++    pub fn is_file(&self) -> bool {
++        self.is(libc::S_IFREG)
++    }
++    pub fn is_symlink(&self) -> bool {
++        self.is(libc::S_IFLNK)
++    }
++
++    pub fn is(&self, mode: mode_t) -> bool {
++        self.masked() == mode
++    }
++
++    fn masked(&self) -> mode_t {
++        self.mode & libc::S_IFMT
++    }
++}
++
++impl fmt::Debug for FileType {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        let FileType { mode } = self;
++        f.debug_struct("FileType").field("mode", &Mode(*mode)).finish()
++    }
++}
++
++impl FromInner<u32> for FilePermissions {
++    fn from_inner(mode: u32) -> FilePermissions {
++        FilePermissions { mode: mode as mode_t }
++    }
++}
++
++impl fmt::Debug for FilePermissions {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        let FilePermissions { mode } = self;
++        f.debug_struct("FilePermissions").field("mode", &Mode(*mode)).finish()
++    }
++}
++
++impl fmt::Debug for ReadDir {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        // This will only be called from std::fs::ReadDir, which will add a "ReadDir()" frame.
++        // Thus the result will be e g 'ReadDir("/home")'
++        fmt::Debug::fmt(&*self.inner.root, f)
++    }
++}
++
++impl Iterator for ReadDir {
++    type Item = io::Result<DirEntry>;
++
++    fn next(&mut self) -> Option<io::Result<DirEntry>> {
++        loop {
++            if self.end_of_stream {
++                return None;
++            }
++            if self.pos == self.len {
++                let fd = self.inner.dirp.0.as_raw_fd();
++                match cvt(unsafe { sys::getdents64(fd, self.buf.as_mut_ptr(), self.buf.len()) }) {
++                    Ok(0) => {
++                        self.end_of_stream = true;
++                        return None;
++                    }
++                    Ok(n) => (self.pos, self.len) = (0, n),
++                    Err(e) => {
++                        // the next call to next() should return None
++                        self.end_of_stream = true;
++                        return Some(Err(e));
++                    }
++                }
++            }
++            let mut it = dirent::Iter::new(&self.buf[self.pos..self.len]);
++            let Some(e) = it.next() else {
++                // a malformed record: drop the rest of this buffer
++                self.pos = self.len;
++                continue;
++            };
++            let parsed = self.len - self.pos - it.remaining();
++            self.pos += parsed;
++            if e.name == b"." || e.name == b".." {
++                continue;
++            }
++            return Some(Ok(DirEntry {
++                entry: dirent64_min { d_ino: e.ino, d_type: e.d_type },
++                // a name from the kernel contains no NUL
++                name: CString::new(e.name).unwrap(),
++                dir: Arc::clone(&self.inner),
++            }));
++        }
++    }
++}
++
++/// Aborts the process if a file descriptor is not open, if debug asserts are enabled
++///
++/// Many IO syscalls can't be fully trusted about EBADF error codes because those
++/// might get bubbled up from a remote FUSE server rather than the file descriptor
++/// in the current process being invalid.
++///
++/// So we check file flags instead which live on the file descriptor and not the underlying file.
++/// The downside is that it costs an extra syscall, so we only do it for debug.
++#[inline]
++pub(crate) fn debug_assert_fd_is_open(fd: RawFd) {
++    // this is similar to assert_unsafe_precondition!() but it doesn't require const
++    if core::ub_checks::check_library_ub() {
++        if let Err(sys::EBADF) = sys::fcntl(fd, sys::F_GETFD, 0) {
++            rtabort!("IO Safety violation: owned file descriptor already closed");
++        }
++    }
++}
++
++impl DirEntry {
++    pub fn path(&self) -> PathBuf {
++        self.dir.root.join(self.file_name_os_str())
++    }
++
++    pub fn file_name(&self) -> OsString {
++        self.file_name_os_str().to_os_string()
++    }
++
++    pub fn metadata(&self) -> io::Result<FileAttr> {
++        statx(self.dir.dirp.0.as_raw_fd(), &self.name, sys::AT_SYMLINK_NOFOLLOW)
++    }
++
++    pub fn file_type(&self) -> io::Result<FileType> {
++        match self.entry.d_type {
++            dirent::DT_CHR => Ok(FileType { mode: libc::S_IFCHR }),
++            dirent::DT_FIFO => Ok(FileType { mode: libc::S_IFIFO }),
++            dirent::DT_LNK => Ok(FileType { mode: libc::S_IFLNK }),
++            dirent::DT_REG => Ok(FileType { mode: libc::S_IFREG }),
++            dirent::DT_SOCK => Ok(FileType { mode: libc::S_IFSOCK }),
++            dirent::DT_DIR => Ok(FileType { mode: libc::S_IFDIR }),
++            dirent::DT_BLK => Ok(FileType { mode: libc::S_IFBLK }),
++            _ => self.metadata().map(|m| m.file_type()),
++        }
++    }
++
++    pub fn ino(&self) -> u64 {
++        self.entry.d_ino
++    }
++
++    pub fn file_name_os_str(&self) -> &OsStr {
++        OsStr::from_bytes(self.name.as_bytes())
++    }
++}
++
++impl OpenOptions {
++    pub fn new() -> OpenOptions {
++        OpenOptions {
++            // generic
++            read: false,
++            write: false,
++            append: false,
++            truncate: false,
++            create: false,
++            create_new: false,
++            // system-specific
++            custom_flags: 0,
++            mode: 0o666,
++        }
++    }
++
++    pub fn read(&mut self, read: bool) {
++        self.read = read;
++    }
++    pub fn write(&mut self, write: bool) {
++        self.write = write;
++    }
++    pub fn append(&mut self, append: bool) {
++        self.append = append;
++    }
++    pub fn truncate(&mut self, truncate: bool) {
++        self.truncate = truncate;
++    }
++    pub fn create(&mut self, create: bool) {
++        self.create = create;
++    }
++    pub fn create_new(&mut self, create_new: bool) {
++        self.create_new = create_new;
++    }
++
++    pub fn custom_flags(&mut self, flags: i32) {
++        self.custom_flags = flags;
++    }
++    pub fn mode(&mut self, mode: u32) {
++        self.mode = mode as mode_t;
++    }
++
++    fn get_access_mode(&self) -> io::Result<c_int> {
++        match (self.read, self.write, self.append) {
++            (true, false, false) => Ok(libc::O_RDONLY),
++            (false, true, false) => Ok(libc::O_WRONLY),
++            (true, true, false) => Ok(libc::O_RDWR),
++            (false, _, true) => Ok(libc::O_WRONLY | libc::O_APPEND),
++            (true, _, true) => Ok(libc::O_RDWR | libc::O_APPEND),
++            (false, false, false) => {
++                // If no access mode is set, check if any creation flags are set
++                // to provide a more descriptive error message
++                if self.create || self.create_new || self.truncate {
++                    Err(io::Error::new(
++                        io::ErrorKind::InvalidInput,
++                        "creating or truncating a file requires write or append access",
++                    ))
++                } else {
++                    Err(io::Error::new(
++                        io::ErrorKind::InvalidInput,
++                        "must specify at least one of read, write, or append access",
++                    ))
++                }
++            }
++        }
++    }
++
++    fn get_creation_mode(&self) -> io::Result<c_int> {
++        match (self.write, self.append) {
++            (true, false) => {}
++            (false, false) => {
++                if self.truncate || self.create || self.create_new {
++                    return Err(io::Error::new(
++                        io::ErrorKind::InvalidInput,
++                        "creating or truncating a file requires write or append access",
++                    ));
++                }
++            }
++            (_, true) => {
++                if self.truncate && !self.create_new {
++                    return Err(io::Error::new(
++                        io::ErrorKind::InvalidInput,
++                        "append and truncate cannot both be enabled",
++                    ));
++                }
++            }
++        }
++
++        Ok(match (self.create, self.truncate, self.create_new) {
++            (false, false, false) => 0,
++            (true, false, false) => libc::O_CREAT,
++            (false, true, false) => libc::O_TRUNC,
++            (true, true, false) => libc::O_CREAT | libc::O_TRUNC,
++            (_, _, true) => libc::O_CREAT | libc::O_EXCL,
++        })
++    }
++
++    fn flags(&self, extra: c_int) -> io::Result<u32> {
++        Ok((libc::O_CLOEXEC
++            | self.get_access_mode()?
++            | self.get_creation_mode()?
++            | (self.custom_flags as c_int & !libc::O_ACCMODE)
++            | extra) as u32)
++    }
++}
++
++impl fmt::Debug for OpenOptions {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        let OpenOptions { read, write, append, truncate, create, create_new, custom_flags, mode } =
++            self;
++        f.debug_struct("OpenOptions")
++            .field("read", read)
++            .field("write", write)
++            .field("append", append)
++            .field("truncate", truncate)
++            .field("create", create)
++            .field("create_new", create_new)
++            .field("custom_flags", custom_flags)
++            .field("mode", &Mode(*mode))
++            .finish()
++    }
++}
++
++fn openat(dirfd: c_int, path: &CStr, flags: u32, mode: mode_t) -> io::Result<OwnedFd> {
++    let fd = cvt_r(|| unsafe { sys::openat(dirfd, path.as_ptr().cast(), flags, mode) })?;
++    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
++}
++
++impl File {
++    pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
++        run_path_with_cstr(path, &|path| File::open_c(path, opts))
++    }
++
++    pub fn open_c(path: &CStr, opts: &OpenOptions) -> io::Result<File> {
++        let fd = openat(sys::AT_FDCWD, path, opts.flags(0)?, opts.mode)?;
++        Ok(File(FileDesc::from_inner(fd)))
++    }
++
++    pub fn file_attr(&self) -> io::Result<FileAttr> {
++        statx(self.as_raw_fd(), c"", sys::AT_EMPTY_PATH)
++    }
++
++    pub fn fsync(&self) -> io::Result<()> {
++        cvt_r(|| sys::fsync(self.as_raw_fd())).map(drop)
++    }
++
++    pub fn datasync(&self) -> io::Result<()> {
++        cvt_r(|| sys::fdatasync(self.as_raw_fd())).map(drop)
++    }
++
++    fn flock(&self, op: c_int) -> io::Result<()> {
++        cvt(sys::flock(self.as_raw_fd(), op as u32)).map(drop)
++    }
++
++    fn try_flock(&self, op: c_int) -> Result<(), TryLockError> {
++        match self.flock(op | libc::LOCK_NB) {
++            Ok(()) => Ok(()),
++            Err(err) if err.kind() == io::ErrorKind::WouldBlock => Err(TryLockError::WouldBlock),
++            Err(err) => Err(TryLockError::Error(err)),
++        }
++    }
++
++    pub fn lock(&self) -> io::Result<()> {
++        self.flock(libc::LOCK_EX)
++    }
++
++    pub fn lock_shared(&self) -> io::Result<()> {
++        self.flock(libc::LOCK_SH)
++    }
++
++    pub fn try_lock(&self) -> Result<(), TryLockError> {
++        self.try_flock(libc::LOCK_EX)
++    }
++
++    pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
++        self.try_flock(libc::LOCK_SH)
++    }
++
++    pub fn unlock(&self) -> io::Result<()> {
++        self.flock(libc::LOCK_UN)
++    }
++
++    pub fn truncate(&self, size: u64) -> io::Result<()> {
++        let size: i64 =
++            size.try_into().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
++        cvt_r(|| sys::ftruncate(self.as_raw_fd(), size as u64)).map(drop)
++    }
++
++    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
++        self.0.read(buf)
++    }
++
++    pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
++        self.0.read_vectored(bufs)
++    }
++
++    #[inline]
++    pub fn is_read_vectored(&self) -> bool {
++        self.0.is_read_vectored()
++    }
++
++    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
++        self.0.read_at(buf, offset)
++    }
++
++    pub fn read_buf(&self, cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
++        self.0.read_buf(cursor)
++    }
++
++    pub fn read_buf_at(&self, cursor: BorrowedCursor<'_, u8>, offset: u64) -> io::Result<()> {
++        self.0.read_buf_at(cursor, offset)
++    }
++
++    pub fn read_vectored_at(&self, bufs: &mut [IoSliceMut<'_>], offset: u64) -> io::Result<usize> {
++        self.0.read_vectored_at(bufs, offset)
++    }
++
++    pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
++        self.0.write(buf)
++    }
++
++    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
++        self.0.write_vectored(bufs)
++    }
++
++    #[inline]
++    pub fn is_write_vectored(&self) -> bool {
++        self.0.is_write_vectored()
++    }
++
++    pub fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
++        self.0.write_at(buf, offset)
++    }
++
++    pub fn write_vectored_at(&self, bufs: &[IoSlice<'_>], offset: u64) -> io::Result<usize> {
++        self.0.write_vectored_at(bufs, offset)
++    }
++
++    #[inline]
++    pub fn flush(&self) -> io::Result<()> {
++        Ok(())
++    }
++
++    pub fn seek(&self, pos: SeekFrom) -> io::Result<u64> {
++        let (whence, pos) = match pos {
++            // Casting to `i64` is fine, too large values will end up as
++            // negative which will cause an error in `lseek`.
++            SeekFrom::Start(off) => (libc::SEEK_SET, off as i64),
++            SeekFrom::End(off) => (libc::SEEK_END, off),
++            SeekFrom::Current(off) => (libc::SEEK_CUR, off),
++        };
++        let n = cvt(sys::lseek(self.as_raw_fd(), pos, whence as u32))?;
++        Ok(n as u64)
++    }
++
++    pub fn size(&self) -> Option<io::Result<u64>> {
++        match self.file_attr().map(|attr| attr.size()) {
++            // Fall back to default implementation if the returned size is 0,
++            // we might be in a proc mount.
++            Ok(0) => None,
++            result => Some(result),
++        }
++    }
++
++    pub fn tell(&self) -> io::Result<u64> {
++        self.seek(SeekFrom::Current(0))
++    }
++
++    pub fn duplicate(&self) -> io::Result<File> {
++        self.0.duplicate().map(File)
++    }
++
++    pub fn set_permissions(&self, perm: FilePermissions) -> io::Result<()> {
++        cvt_r(|| sys::fchmod(self.as_raw_fd(), perm.mode)).map(drop)
++    }
++
++    pub fn set_times(&self, times: FileTimes) -> io::Result<()> {
++        let times = [file_time_to_timespec(times.accessed)?, file_time_to_timespec(times.modified)?];
++        // utimensat with a null path is futimens
++        cvt(unsafe { sys::utimensat(self.as_raw_fd(), ptr::null(), times.as_ptr(), 0) }).map(drop)
++    }
++}
++
++fn file_time_to_timespec(time: Option<SystemTime>) -> io::Result<sys::Timespec> {
++    match time {
++        Some(time) if let Some(ts) = time.t.to_timespec() => {
++            Ok(sys::Timespec { sec: ts.tv_sec, nsec: ts.tv_nsec })
++        }
++        Some(time) if time > crate::sys::time::UNIX_EPOCH => Err(io::const_error!(
++            io::ErrorKind::InvalidInput,
++            "timestamp is too large to set as a file time",
++        )),
++        Some(_) => Err(io::const_error!(
++            io::ErrorKind::InvalidInput,
++            "timestamp is too small to set as a file time",
++        )),
++        None => Ok(sys::Timespec { sec: 0, nsec: libc::UTIME_OMIT as _ }),
++    }
++}
++
++impl DirBuilder {
++    pub fn new() -> DirBuilder {
++        DirBuilder { mode: 0o777 }
++    }
++
++    pub fn mkdir(&self, p: &Path) -> io::Result<()> {
++        run_path_with_cstr(p, &|p| {
++            cvt(unsafe { sys::mkdirat(sys::AT_FDCWD, p.as_ptr().cast(), self.mode) }).map(drop)
++        })
++    }
++
++    pub fn set_mode(&mut self, mode: u32) {
++        self.mode = mode as mode_t;
++    }
++}
++
++impl fmt::Debug for DirBuilder {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        let DirBuilder { mode } = self;
++        f.debug_struct("DirBuilder").field("mode", &Mode(*mode)).finish()
++    }
++}
++
++impl AsInner<FileDesc> for File {
++    #[inline]
++    fn as_inner(&self) -> &FileDesc {
++        &self.0
++    }
++}
++
++impl AsInnerMut<FileDesc> for File {
++    #[inline]
++    fn as_inner_mut(&mut self) -> &mut FileDesc {
++        &mut self.0
++    }
++}
++
++impl IntoInner<FileDesc> for File {
++    fn into_inner(self) -> FileDesc {
++        self.0
++    }
++}
++
++impl FromInner<FileDesc> for File {
++    fn from_inner(file_desc: FileDesc) -> Self {
++        Self(file_desc)
++    }
++}
++
++impl AsFd for File {
++    #[inline]
++    fn as_fd(&self) -> BorrowedFd<'_> {
++        self.0.as_fd()
++    }
++}
++
++impl AsRawFd for File {
++    #[inline]
++    fn as_raw_fd(&self) -> RawFd {
++        self.0.as_raw_fd()
++    }
++}
++
++impl IntoRawFd for File {
++    fn into_raw_fd(self) -> RawFd {
++        self.0.into_raw_fd()
++    }
++}
++
++impl FromRawFd for File {
++    unsafe fn from_raw_fd(raw_fd: RawFd) -> Self {
++        Self(unsafe { FromRawFd::from_raw_fd(raw_fd) })
++    }
++}
++
++impl fmt::Debug for File {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        let fd = self.as_raw_fd();
++        let mut b = debug_path_fd(fd, f, "File");
++        b.finish()
++    }
++}
++
++// Format in octal, followed by the mode format used in `ls -l`.
++//
++// Example:
++//   0o100664 (-rw-rw-r--)
++impl fmt::Debug for Mode {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        let Self(mode) = *self;
++        write!(f, "0o{mode:06o}")?;
++
++        let entry_type = match mode & libc::S_IFMT {
++            libc::S_IFDIR => 'd',
++            libc::S_IFBLK => 'b',
++            libc::S_IFCHR => 'c',
++            libc::S_IFLNK => 'l',
++            libc::S_IFIFO => 'p',
++            libc::S_IFREG => '-',
++            _ => return Ok(()),
++        };
++
++        f.write_str(" (")?;
++        f.write_char(entry_type)?;
++
++        // Owner permissions
++        f.write_char(if mode & libc::S_IRUSR != 0 { 'r' } else { '-' })?;
++        f.write_char(if mode & libc::S_IWUSR != 0 { 'w' } else { '-' })?;
++        let owner_executable = mode & libc::S_IXUSR != 0;
++        let setuid = mode as c_int & libc::S_ISUID as c_int != 0;
++        f.write_char(match (owner_executable, setuid) {
++            (true, true) => 's',  // executable and setuid
++            (false, true) => 'S', // setuid
++            (true, false) => 'x', // executable
++            (false, false) => '-',
++        })?;
++
++        // Group permissions
++        f.write_char(if mode & libc::S_IRGRP != 0 { 'r' } else { '-' })?;
++        f.write_char(if mode & libc::S_IWGRP != 0 { 'w' } else { '-' })?;
++        let group_executable = mode & libc::S_IXGRP != 0;
++        let setgid = mode as c_int & libc::S_ISGID as c_int != 0;
++        f.write_char(match (group_executable, setgid) {
++            (true, true) => 's',  // executable and setgid
++            (false, true) => 'S', // setgid
++            (true, false) => 'x', // executable
++            (false, false) => '-',
++        })?;
++
++        // Other permissions
++        f.write_char(if mode & libc::S_IROTH != 0 { 'r' } else { '-' })?;
++        f.write_char(if mode & libc::S_IWOTH != 0 { 'w' } else { '-' })?;
++        let other_executable = mode & libc::S_IXOTH != 0;
++        let sticky = mode as c_int & libc::S_ISVTX as c_int != 0;
++        f.write_char(match (entry_type, other_executable, sticky) {
++            ('d', true, true) => 't',  // searchable and restricted deletion
++            ('d', false, true) => 'T', // restricted deletion
++            (_, true, _) => 'x',       // executable
++            (_, false, _) => '-',
++        })?;
++
++        f.write_char(')')
++    }
++}
++
++fn opendir(dirfd: c_int, p: &CStr, nofollow: bool) -> io::Result<OwnedFd> {
++    let mut flags = libc::O_CLOEXEC | libc::O_RDONLY | libc::O_DIRECTORY;
++    if nofollow {
++        flags |= libc::O_NOFOLLOW;
++    }
++    openat(dirfd, p, flags as u32, 0)
++}
++
++pub fn readdir(path: &Path) -> io::Result<ReadDir> {
++    let fd = run_path_with_cstr(path, &|p| opendir(sys::AT_FDCWD, p, false))?;
++    let root = path.to_path_buf();
++    Ok(ReadDir::new(InnerReadDir { dirp: DirStream(fd), root }))
++}
++
++pub fn unlink(p: &CStr) -> io::Result<()> {
++    cvt(unsafe { sys::unlinkat(sys::AT_FDCWD, p.as_ptr().cast(), 0) }).map(drop)
++}
++
++pub fn rename(old: &CStr, new: &CStr) -> io::Result<()> {
++    cvt(unsafe {
++        sys::renameat2(sys::AT_FDCWD, old.as_ptr().cast(), sys::AT_FDCWD, new.as_ptr().cast(), 0)
++    })
++    .map(drop)
++}
++
++pub fn set_perm(p: &CStr, perm: FilePermissions) -> io::Result<()> {
++    cvt_r(|| unsafe { sys::fchmodat(sys::AT_FDCWD, p.as_ptr().cast(), perm.mode) }).map(drop)
++}
++
++pub fn set_perm_nofollow(p: &CStr, perm: FilePermissions) -> io::Result<()> {
++    #[inline]
++    /// Helper function for fallback open with `O_NOFOLLOW` + `fchmod` behavior
++    fn open_and_set_permissions(p: &CStr, perm: FilePermissions) -> io::Result<()> {
++        use crate::fs::{OpenOptions, Permissions};
++        use crate::os::unix::fs::OpenOptionsExt;
++
++        let mut options = OpenOptions::new();
++        options.read(true);
++        options.custom_flags(libc::O_NOFOLLOW);
++
++        // SAFETY: Since this function is called with `with_native_path`
++        // and that successfully converted the `&Path` to a `CString`,
++        // it should be safe to convert the `&CStr` back to a `Path`.
++        let os_str = unsafe { OsStr::from_encoded_bytes_unchecked(p.to_bytes()) };
++        options.open(Path::new(os_str))?.set_permissions(Permissions::from_inner(perm))
++    }
++
++    // fchmodat2 (Linux 6.6) takes AT_SYMLINK_NOFOLLOW; before it, fall back to
++    // open + fchmod, which fails with ELOOP on a symlink
++    let res = cvt_r(|| unsafe {
++        sys::fchmodat2(sys::AT_FDCWD, p.as_ptr().cast(), perm.mode, sys::AT_SYMLINK_NOFOLLOW)
++    })
++    .map(drop);
++    match res {
++        Err(err) if err.raw_os_error() == Some(libc::ENOSYS) => match open_and_set_permissions(p, perm) {
++            Err(e) if e.kind() == io::ErrorKind::FilesystemLoop => {
++                // keep the error consistent with fchmodat2 on a symlink
++                Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP))
++            }
++            r => r,
++        },
++        r => r,
++    }
++}
++
++pub fn rmdir(p: &CStr) -> io::Result<()> {
++    cvt(unsafe { sys::unlinkat(sys::AT_FDCWD, p.as_ptr().cast(), sys::AT_REMOVEDIR) }).map(drop)
++}
++
++pub fn readlink(c_path: &CStr) -> io::Result<PathBuf> {
++    let p = c_path.as_ptr().cast();
++
++    let mut buf = Vec::with_capacity(256);
++
++    loop {
++        let buf_read =
++            cvt(unsafe { sys::readlinkat(sys::AT_FDCWD, p, buf.as_mut_ptr(), buf.capacity()) })?;
++
++        unsafe {
++            buf.set_len(buf_read);
++        }
++
++        if buf_read != buf.capacity() {
++            buf.shrink_to_fit();
++
++            return Ok(PathBuf::from(OsString::from_vec(buf)));
++        }
++
++        // Trigger the internal buffer resizing logic of `Vec` by requiring
++        // more space than the current capacity. The length is guaranteed to be
++        // the same as the capacity due to the if statement above.
++        buf.reserve(1);
++    }
++}
++
++pub fn symlink(original: &CStr, link: &CStr) -> io::Result<()> {
++    cvt(unsafe { sys::symlinkat(original.as_ptr().cast(), sys::AT_FDCWD, link.as_ptr().cast()) })
++        .map(drop)
++}
++
++pub fn link(original: &CStr, link: &CStr) -> io::Result<()> {
++    cvt(unsafe {
++        sys::linkat(sys::AT_FDCWD, original.as_ptr().cast(), sys::AT_FDCWD, link.as_ptr().cast(), 0)
++    })
++    .map(drop)
++}
++
++pub fn stat(p: &CStr) -> io::Result<FileAttr> {
++    statx(sys::AT_FDCWD, p, 0)
++}
++
++pub fn lstat(p: &CStr) -> io::Result<FileAttr> {
++    statx(sys::AT_FDCWD, p, sys::AT_SYMLINK_NOFOLLOW)
++}
++
++pub fn canonicalize(path: &CStr) -> io::Result<PathBuf> {
++    // Open the path itself (O_PATH: no access to its contents needed) and
++    // ask the kernel what it resolved to.
++    let fd = openat(sys::AT_FDCWD, path, (libc::O_PATH | libc::O_CLOEXEC) as u32, 0)?;
++    let resolved = get_path_from_fd(fd.as_raw_fd()).ok_or_else(|| {
++        io::const_error!(io::ErrorKind::Unsupported, "canonicalize requires /proc to be mounted")
++    })?;
++    // the kernel's name for a file that was deleted meanwhile
++    if resolved.as_os_str().as_bytes().ends_with(b" (deleted)") {
++        return Err(io::Error::from_raw_os_error(libc::ENOENT));
++    }
++    Ok(resolved)
++}
++
++fn open_from(from: &Path) -> io::Result<(crate::fs::File, crate::fs::Metadata)> {
++    use crate::fs::File;
++    use crate::sys::fs::common::NOT_FILE_ERROR;
++
++    let reader = File::open(from)?;
++    let metadata = reader.metadata()?;
++    if !metadata.is_file() {
++        return Err(NOT_FILE_ERROR);
++    }
++    Ok((reader, metadata))
++}
++
++fn set_times_impl(p: &CStr, times: FileTimes, follow_symlinks: bool) -> io::Result<()> {
++    let flags = if follow_symlinks { 0 } else { sys::AT_SYMLINK_NOFOLLOW };
++    let times = [file_time_to_timespec(times.accessed)?, file_time_to_timespec(times.modified)?];
++    cvt(unsafe { sys::utimensat(sys::AT_FDCWD, p.as_ptr().cast(), times.as_ptr(), flags) })
++        .map(drop)
++}
++
++#[inline(always)]
++pub fn set_times(p: &CStr, times: FileTimes) -> io::Result<()> {
++    set_times_impl(p, times, true)
++}
++
++#[inline(always)]
++pub fn set_times_nofollow(p: &CStr, times: FileTimes) -> io::Result<()> {
++    set_times_impl(p, times, false)
++}
++
++fn open_to_and_set_permissions(
++    to: &Path,
++    reader_metadata: &crate::fs::Metadata,
++) -> io::Result<(crate::fs::File, crate::fs::Metadata)> {
++    use crate::fs::OpenOptions;
++    use crate::os::unix::fs::{OpenOptionsExt, PermissionsExt};
++
++    let perm = reader_metadata.permissions();
++    let writer = OpenOptions::new()
++        // create the file with the correct mode right away
++        .mode(perm.mode())
++        .write(true)
++        .create(true)
++        .truncate(true)
++        .open(to)?;
++    let writer_metadata = writer.metadata()?;
++    if writer_metadata.is_file() {
++        // Set the correct file permissions, in case the file already existed.
++        // Don't set the permissions on already existing non-files like
++        // pipes/FIFOs or device nodes.
++        writer.set_permissions(perm)?;
++    }
++    Ok((writer, writer_metadata))
++}
++
++mod cfm {
++    use crate::fs::{File, Metadata};
++    use crate::io::{BorrowedCursor, IoSlice, IoSliceMut, Read, Result, Write};
++
++    #[allow(dead_code)]
++    pub struct CachedFileMetadata(pub File, pub Metadata);
++
++    impl Read for CachedFileMetadata {
++        fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
++            self.0.read(buf)
++        }
++        fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> Result<usize> {
++            self.0.read_vectored(bufs)
++        }
++        fn read_buf(&mut self, cursor: BorrowedCursor<'_, u8>) -> Result<()> {
++            self.0.read_buf(cursor)
++        }
++        #[inline]
++        fn is_read_vectored(&self) -> bool {
++            self.0.is_read_vectored()
++        }
++        fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
++            self.0.read_to_end(buf)
++        }
++        fn read_to_string(&mut self, buf: &mut String) -> Result<usize> {
++            self.0.read_to_string(buf)
++        }
++    }
++    impl Write for CachedFileMetadata {
++        fn write(&mut self, buf: &[u8]) -> Result<usize> {
++            self.0.write(buf)
++        }
++        fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
++            self.0.write_vectored(bufs)
++        }
++        #[inline]
++        fn is_write_vectored(&self) -> bool {
++            self.0.is_write_vectored()
++        }
++        #[inline]
++        fn flush(&mut self) -> Result<()> {
++            self.0.flush()
++        }
++    }
++}
++pub(in crate::sys) use cfm::CachedFileMetadata;
++
++pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
++    let (reader, reader_metadata) = open_from(from)?;
++    let (writer, writer_metadata) = open_to_and_set_permissions(to, &reader_metadata)?;
++
++    io::copy(
++        &mut cfm::CachedFileMetadata(reader, reader_metadata),
++        &mut cfm::CachedFileMetadata(writer, writer_metadata),
++    )
++}
++
++pub fn chown(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
++    run_path_with_cstr(path, &|path| {
++        cvt(unsafe { sys::fchownat(sys::AT_FDCWD, path.as_ptr().cast(), uid, gid, 0) }).map(drop)
++    })
++}
++
++pub fn fchown(fd: c_int, uid: u32, gid: u32) -> io::Result<()> {
++    cvt(sys::fchown(fd, uid, gid)).map(drop)
++}
++
++pub fn lchown(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
++    run_path_with_cstr(path, &|path| {
++        cvt(unsafe {
++            sys::fchownat(sys::AT_FDCWD, path.as_ptr().cast(), uid, gid, sys::AT_SYMLINK_NOFOLLOW)
++        })
++        .map(drop)
++    })
++}
++
++pub fn chroot(dir: &Path) -> io::Result<()> {
++    run_path_with_cstr(dir, &|dir| cvt(unsafe { sys::chroot(dir.as_ptr().cast()) }).map(drop))
++}
++
++pub fn mkfifo(path: &Path, mode: u32) -> io::Result<()> {
++    run_path_with_cstr(path, &|path| {
++        cvt(unsafe { sys::mknodat(sys::AT_FDCWD, path.as_ptr().cast(), libc::S_IFIFO | mode, 0) })
++            .map(drop)
++    })
++}
++
++pub use remove_dir_impl::remove_dir_all;
++
++// Using openat(), unlinkat() and getdents64() on the directory fds
++mod remove_dir_impl {
++    use super::{
++        AsRawFd, DirEntry, DirStream, InnerReadDir, OwnedFd, RawFd, ReadDir, dirent, lstat,
++        opendir, sys,
++    };
++    use crate::ffi::CStr;
++    use crate::io;
++    use crate::path::{Path, PathBuf};
++    use crate::sys::cvt;
++    use crate::sys::helpers::{ignore_notfound, run_path_with_cstr};
++
++    pub fn openat_nofollow_dironly(parent_fd: Option<RawFd>, p: &CStr) -> io::Result<OwnedFd> {
++        opendir(parent_fd.unwrap_or(sys::AT_FDCWD), p, true)
++    }
++
++    fn fdreaddir(dir_fd: OwnedFd) -> (ReadDir, RawFd) {
++        let fd = dir_fd.as_raw_fd();
++        // a valid root is not needed because we do not call any functions involving the full path
++        // of the `DirEntry`s.
++        let dummy_root = PathBuf::new();
++        let inner = InnerReadDir { dirp: DirStream(dir_fd), root: dummy_root };
++        (ReadDir::new(inner), fd)
++    }
++
++    fn is_dir(ent: &DirEntry) -> Option<bool> {
++        match ent.entry.d_type {
++            dirent::DT_UNKNOWN => None,
++            dirent::DT_DIR => Some(true),
++            _ => Some(false),
++        }
++    }
++
++    fn is_enoent(result: &io::Result<()>) -> bool {
++        if let Err(err) = result
++            && matches!(err.raw_os_error(), Some(libc::ENOENT))
++        {
++            true
++        } else {
++            false
++        }
++    }
++
++    fn unlinkat(fd: RawFd, path: &CStr, flags: u32) -> io::Result<()> {
++        cvt(unsafe { sys::unlinkat(fd, path.as_ptr().cast(), flags) }).map(drop)
++    }
++
++    fn remove_dir_all_recursive(parent_fd: Option<RawFd>, path: &CStr) -> io::Result<()> {
++        // try opening as directory
++        let fd = match openat_nofollow_dironly(parent_fd, path) {
++            Err(err) if matches!(err.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP)) => {
++                // not a directory - don't traverse further
++                // (for symlinks, older Linux kernels may return ELOOP instead of ENOTDIR)
++                return match parent_fd {
++                    // unlink...
++                    Some(parent_fd) => unlinkat(parent_fd, path, 0),
++                    // ...unless this was supposed to be the deletion root directory
++                    None => Err(err),
++                };
++            }
++            result => result?,
++        };
++
++        // the ReadDir owns the fd from here on
++        let (dir, fd) = fdreaddir(fd);
++
++        for child in dir {
++            let child = child?;
++            // we need an inner try block, because if one of these
++            // directories has already been deleted, then we need to
++            // continue the loop, not return ok.
++            let result: io::Result<()> = try {
++                match is_dir(&child) {
++                    Some(true) => {
++                        remove_dir_all_recursive(Some(fd), &child.name)?;
++                    }
++                    Some(false) => {
++                        unlinkat(fd, &child.name, 0)?;
++                    }
++                    None => {
++                        // POSIX specifies that calling unlink()/unlinkat(..., 0) on a directory can succeed
++                        // if the process has the appropriate privileges. This however can causing orphaned
++                        // directories requiring an fsck e.g. on Solaris and Illumos. So we try recursing
++                        // into it first instead of trying to unlink() it.
++                        remove_dir_all_recursive(Some(fd), &child.name)?;
++                    }
++                }
++            };
++            if result.is_err() && !is_enoent(&result) {
++                return result;
++            }
++        }
++
++        // unlink the directory after removing its contents
++        ignore_notfound(unlinkat(parent_fd.unwrap_or(sys::AT_FDCWD), path, sys::AT_REMOVEDIR))?;
++        Ok(())
++    }
++
++    fn remove_dir_all_modern(p: &CStr) -> io::Result<()> {
++        // We cannot just call remove_dir_all_recursive() here because that would not delete a passed
++        // symlink. No need to worry about races, because remove_dir_all_recursive() does not recurse
++        // into symlinks.
++        let attr = lstat(p)?;
++        if attr.file_type().is_symlink() {
++            super::unlink(p)
++        } else {
++            remove_dir_all_recursive(None, p)
++        }
++    }
++
++    pub fn remove_dir_all(p: &Path) -> io::Result<()> {
++        run_path_with_cstr(p, &remove_dir_all_modern)
++    }
++}
++
++pub struct Dir(OwnedFd);
++
++impl Dir {
++    pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<Self> {
++        run_path_with_cstr(path, &|path| {
++            openat(sys::AT_FDCWD, path, opts.flags(libc::O_DIRECTORY)?, opts.mode).map(Self)
++        })
++    }
++
++    pub fn open_for_traversal(path: &Path) -> io::Result<Self> {
++        let flags = libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_PATH;
++        run_path_with_cstr(path, &|path| openat(sys::AT_FDCWD, path, flags as u32, 0).map(Self))
++    }
++
++    pub fn open_file(&self, path: &Path, opts: &OpenOptions) -> io::Result<File> {
++        run_path_with_cstr(path, &|path| {
++            openat(self.0.as_raw_fd(), path, opts.flags(0)?, opts.mode)
++        })
++        .map(FileDesc::from_inner)
++        .map(File)
++    }
++
++    pub fn metadata(&self) -> io::Result<FileAttr> {
++        statx(self.0.as_raw_fd(), c"", sys::AT_EMPTY_PATH)
++    }
++
++    pub fn remove_file(&self, path: &Path) -> io::Result<()> {
++        run_path_with_cstr(path, &|path| self.remove_c(path, false))
++    }
++
++    pub fn rename(&self, from: &Path, to_dir: &Self, to: &Path) -> io::Result<()> {
++        run_path_with_cstr(from, &|from| {
++            run_path_with_cstr(to, &|to| {
++                cvt(unsafe {
++                    sys::renameat2(
++                        self.0.as_raw_fd(),
++                        from.as_ptr().cast(),
++                        to_dir.0.as_raw_fd(),
++                        to.as_ptr().cast(),
++                        0,
++                    )
++                })
++                .map(drop)
++            })
++        })
++    }
++
++    pub fn open_dir(&self, path: &Path, opts: &OpenOptions) -> io::Result<Self> {
++        run_path_with_cstr(path, &|path| {
++            openat(self.0.as_raw_fd(), path, opts.flags(libc::O_DIRECTORY)?, opts.mode)
++        })
++        .map(Self)
++    }
++
++    pub fn create_dir(&self, path: &Path) -> io::Result<()> {
++        run_path_with_cstr(path, &|path| {
++            cvt(unsafe { sys::mkdirat(self.0.as_raw_fd(), path.as_ptr().cast(), 0o777) }).map(drop)
++        })
++    }
++
++    pub fn remove_dir(&self, path: &Path) -> io::Result<()> {
++        run_path_with_cstr(path, &|path| self.remove_c(path, true))
++    }
++
++    fn remove_c(&self, path: &CStr, remove_dir: bool) -> io::Result<()> {
++        let flags = if remove_dir { sys::AT_REMOVEDIR } else { 0 };
++        cvt(unsafe { sys::unlinkat(self.0.as_raw_fd(), path.as_ptr().cast(), flags) }).map(drop)
++    }
++}
++
++impl fmt::Debug for Dir {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        let fd = self.0.as_raw_fd();
++        let mut b = debug_path_fd(fd, f, "Dir");
++        b.finish()
++    }
++}
++
++#[unstable(feature = "dirfd", issue = "120426")]
++impl AsRawFd for fs::Dir {
++    fn as_raw_fd(&self) -> RawFd {
++        self.as_inner().0.as_raw_fd()
++    }
++}
++
++#[unstable(feature = "dirfd", issue = "120426")]
++impl IntoRawFd for fs::Dir {
++    fn into_raw_fd(self) -> RawFd {
++        self.into_inner().0.into_raw_fd()
++    }
++}
++
++#[unstable(feature = "dirfd", issue = "120426")]
++impl FromRawFd for fs::Dir {
++    unsafe fn from_raw_fd(fd: RawFd) -> Self {
++        Self::from_inner(Dir(unsafe { FromRawFd::from_raw_fd(fd) }))
++    }
++}
++
++#[unstable(feature = "dirfd", issue = "120426")]
++impl AsFd for fs::Dir {
++    fn as_fd(&self) -> BorrowedFd<'_> {
++        self.as_inner().0.as_fd()
++    }
++}
++
++#[unstable(feature = "dirfd", issue = "120426")]
++impl From<fs::Dir> for OwnedFd {
++    fn from(value: fs::Dir) -> Self {
++        value.into_inner().0
++    }
++}
++
++#[unstable(feature = "dirfd", issue = "120426")]
++impl From<OwnedFd> for fs::Dir {
++    fn from(value: OwnedFd) -> Self {
++        Self::from_inner(Dir(value))
++    }
++}
+diff --git a/library/std/src/sys/fs/mod.rs b/library/std/src/sys/fs/mod.rs
+index b2666eb..e58db1e 100644
+--- a/library/std/src/sys/fs/mod.rs
++++ b/library/std/src/sys/fs/mod.rs
+@@ -6,6 +6,15 @@ use crate::path::{Path, PathBuf};
+ pub mod common;
+ 
+ cfg_select! {
++    linux_none => {
++        mod linux_none;
++        use linux_none as imp;
++        pub(super) use linux_none::CachedFileMetadata;
++        pub(crate) use linux_none::debug_assert_fd_is_open;
++        pub use linux_none::{chown, chroot, fchown, lchown, mkfifo};
++
++        use crate::sys::helpers::run_path_with_cstr as with_native_path;
++    }
+     any(target_family = "unix", target_os = "wasi") => {
+         mod unix;
+         use unix as imp;
+diff --git a/library/std/src/sys/io/error/linux_none.rs b/library/std/src/sys/io/error/linux_none.rs
+new file mode 100644
+index 0000000..c9ebc79
+--- /dev/null
++++ b/library/std/src/sys/io/error/linux_none.rs
+@@ -0,0 +1,93 @@
++//! errno on linux-none: there is no libc errno, but `io::Error::last_os_error`
++//! and `set_errno` still need one, so it is a thread-local that the syscall
++//! wrappers' `cvt` records failures in.
++
++use crate::ffi::c_int;
++use crate::{fmt, io};
++
++#[thread_local]
++static mut ERRNO: c_int = 0;
++
++/// The address of this thread's errno (unique per thread).
++#[inline]
++pub fn errno_location() -> *mut c_int {
++    &raw mut ERRNO
++}
++
++#[inline]
++pub fn errno() -> i32 {
++    unsafe { *errno_location() }
++}
++
++#[inline]
++pub fn set_errno(e: i32) {
++    unsafe { *errno_location() = e }
++}
++
++#[inline]
++pub fn is_interrupted(errno: i32) -> bool {
++    errno == libc::EINTR
++}
++
++pub fn decode_error_kind(errno: i32) -> io::ErrorKind {
++    use io::ErrorKind::*;
++    match errno as libc::c_int {
++        libc::E2BIG => ArgumentListTooLong,
++        libc::EADDRINUSE => AddrInUse,
++        libc::EADDRNOTAVAIL => AddrNotAvailable,
++        libc::EBUSY => ResourceBusy,
++        libc::ECONNABORTED => ConnectionAborted,
++        libc::ECONNREFUSED => ConnectionRefused,
++        libc::ECONNRESET => ConnectionReset,
++        libc::EDEADLK => Deadlock,
++        libc::EDQUOT => QuotaExceeded,
++        libc::EEXIST => AlreadyExists,
++        libc::EFBIG => FileTooLarge,
++        libc::EHOSTUNREACH => HostUnreachable,
++        libc::EINTR => Interrupted,
++        libc::EINVAL => InvalidInput,
++        libc::EISDIR => IsADirectory,
++        libc::ELOOP => FilesystemLoop,
++        libc::ENOENT => NotFound,
++        libc::ENOMEM => OutOfMemory,
++        libc::ENOSPC => StorageFull,
++        libc::EMLINK => TooManyLinks,
++        libc::ENAMETOOLONG => InvalidFilename,
++        libc::ENETDOWN => NetworkDown,
++        libc::ENETUNREACH => NetworkUnreachable,
++        libc::ENOTCONN => NotConnected,
++        libc::ENOTDIR => NotADirectory,
++        #[cfg(not(target_os = "aix"))]
++        libc::ENOTEMPTY => DirectoryNotEmpty,
++        libc::EPIPE => BrokenPipe,
++        libc::EROFS => ReadOnlyFilesystem,
++        libc::ESPIPE => NotSeekable,
++        libc::ESTALE => StaleNetworkFileHandle,
++        libc::ETIMEDOUT => TimedOut,
++        libc::ETXTBSY => ExecutableFileBusy,
++        libc::EXDEV => CrossesDevices,
++        libc::EINPROGRESS => InProgress,
++        libc::EMFILE | libc::ENFILE => TooManyOpenFiles,
++        libc::EIO => InputOutputError,
++
++        libc::EACCES | libc::EPERM => PermissionDenied,
++
++        libc::ENOSYS => Unsupported,
++        // EOPNOTSUPP and ENOTSUP can have the same value on some systems,
++        // but different values on others (e.g. Apple), so we can't use a
++        // match clause
++        x if x == libc::EOPNOTSUPP || x == libc::ENOTSUP => Unsupported,
++
++        // These two constants can have the same value on some systems,
++        // but different values on others, so we can't use a match
++        // clause
++        x if x == libc::EAGAIN || x == libc::EWOULDBLOCK => WouldBlock,
++
++        _ => Uncategorized,
++    }
++}
++
++/// Gets a detailed string description for the given error number.
++pub fn format_error(errno: i32, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++    f.write_str(linux_none_rt::sys::strerror(errno))
++}
+diff --git a/library/std/src/sys/io/error/mod.rs b/library/std/src/sys/io/error/mod.rs
+index a56030f..d287715 100644
+--- a/library/std/src/sys/io/error/mod.rs
++++ b/library/std/src/sys/io/error/mod.rs
+@@ -1,4 +1,8 @@
+ cfg_select! {
++    linux_none => {
++        mod linux_none;
++        pub use linux_none::*;
++    }
+     target_os = "hermit" => {
+         mod hermit;
+         pub use hermit::*;
+diff --git a/library/std/src/sys/io/is_terminal/linux_none.rs b/library/std/src/sys/io/is_terminal/linux_none.rs
+new file mode 100644
+index 0000000..b4a4db4
+--- /dev/null
++++ b/library/std/src/sys/io/is_terminal/linux_none.rs
+@@ -0,0 +1,9 @@
++use crate::os::fd::{AsFd, AsRawFd};
++
++pub fn is_terminal(fd: &impl AsFd) -> bool {
++    // isatty(3): a terminal is what answers TCGETS
++    const TCGETS: usize = 0x5401;
++    let mut termios = [0u8; 64];
++    let fd = fd.as_fd().as_raw_fd();
++    unsafe { linux_none_rt::sys::ioctl(fd, TCGETS, termios.as_mut_ptr() as usize) }.is_ok()
++}
+diff --git a/library/std/src/sys/io/kernel_copy/mod.rs b/library/std/src/sys/io/kernel_copy/mod.rs
+index 6f4b130..2122f37 100644
+--- a/library/std/src/sys/io/kernel_copy/mod.rs
++++ b/library/std/src/sys/io/kernel_copy/mod.rs
+@@ -1,4 +1,7 @@
+ cfg_select! {
++    // io::copy copies through a userspace buffer (no copy_file_range,
++    // sendfile or splice yet)
++    linux_none => {}
+     any(target_os = "linux", target_os = "android") => {
+         mod linux;
+     }
+diff --git a/library/std/src/sys/io/mod.rs b/library/std/src/sys/io/mod.rs
+index b9c48e3..1fac971 100644
+--- a/library/std/src/sys/io/mod.rs
++++ b/library/std/src/sys/io/mod.rs
+@@ -4,6 +4,10 @@ mod error;
+ 
+ mod is_terminal {
+     cfg_select! {
++        linux_none => {
++            mod linux_none;
++            pub use linux_none::*;
++        }
+         any(target_family = "unix", target_os = "wasi") => {
+             mod isatty;
+             pub use isatty::*;
+diff --git a/library/std/src/sys/net/connection/socket/linux_none.rs b/library/std/src/sys/net/connection/socket/linux_none.rs
+new file mode 100644
+index 0000000..ffa5d72
+--- /dev/null
++++ b/library/std/src/sys/net/connection/socket/linux_none.rs
+@@ -0,0 +1,620 @@
++//! Sockets on linux-none.
++//!
++//! The generic socket code (`socket/mod.rs`) and `os::unix::net` call the
++//! platform through `netc`, which elsewhere is libc. Here `netc` is libc's
++//! types and constants plus [`netc`]'s own functions, with libc's signatures
++//! and conventions (`-1` and errno on failure), on `linux_none_rt` syscalls.
++//! Host name lookup knows only numeric addresses and `localhost`: there is no
++//! resolver.
++
++#![allow(dead_code)]
++
++use libc::{MSG_PEEK, c_int, c_void, sockaddr, socklen_t};
++
++use crate::io::{self, BorrowedBuf, BorrowedCursor, IoSlice, IoSliceMut};
++use crate::net::{Shutdown, SocketAddr};
++use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
++use crate::sys::fd::FileDesc;
++use crate::sys::net::{getsockopt, setsockopt};
++use crate::sys::{AsInner, FromInner, IntoInner};
++use crate::time::{Duration, Instant};
++use crate::{cmp, mem};
++
++use super::socket_addr_to_c;
++
++#[expect(non_camel_case_types)]
++pub type wrlen_t = libc::size_t;
++
++/// libc's interface to sockets, on raw syscalls.
++pub(crate) mod netc {
++    #![allow(non_camel_case_types)]
++
++    use linux_none_rt::sys;
++    // types and constants (functions not defined below would come from libc,
++    // which the link check rejects)
++    pub use libc::*;
++
++    use crate::sys::io::set_errno;
++
++    fn ret(r: Result<usize, i32>) -> isize {
++        match r {
++            Ok(v) => v as isize,
++            Err(e) => {
++                set_errno(e);
++                -1
++            }
++        }
++    }
++
++    pub unsafe fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int {
++        ret(sys::socket(domain as u16, ty as u32, protocol as u32).map(|f| f as usize)) as c_int
++    }
++    pub unsafe fn socketpair(domain: c_int, ty: c_int, protocol: c_int, sv: *mut c_int) -> c_int {
++        ret(unsafe { sys::socketpair(domain as u16, ty as u32, protocol as u32, sv.cast()) }) as c_int
++    }
++    pub unsafe fn connect(fd: c_int, addr: *const sockaddr, len: socklen_t) -> c_int {
++        ret(unsafe { sys::connect(fd, addr.cast(), len) }) as c_int
++    }
++    pub unsafe fn bind(fd: c_int, addr: *const sockaddr, len: socklen_t) -> c_int {
++        ret(unsafe { sys::bind(fd, addr.cast(), len) }) as c_int
++    }
++    pub unsafe fn listen(fd: c_int, backlog: c_int) -> c_int {
++        ret(sys::listen(fd, backlog)) as c_int
++    }
++    pub unsafe fn accept4(fd: c_int, addr: *mut sockaddr, len: *mut socklen_t, flags: c_int) -> c_int {
++        ret(unsafe { sys::accept4(fd, addr.cast(), len, flags as u32) }.map(|f| f as usize)) as c_int
++    }
++    pub unsafe fn send(fd: c_int, buf: *const c_void, len: size_t, flags: c_int) -> ssize_t {
++        unsafe { sendto(fd, buf, len, flags, crate::ptr::null(), 0) }
++    }
++    pub unsafe fn sendto(
++        fd: c_int,
++        buf: *const c_void,
++        len: size_t,
++        flags: c_int,
++        addr: *const sockaddr,
++        alen: socklen_t,
++    ) -> ssize_t {
++        ret(unsafe { sys::sendto(fd, buf.cast(), len, flags as u32, addr.cast(), alen) })
++    }
++    pub unsafe fn recv(fd: c_int, buf: *mut c_void, len: size_t, flags: c_int) -> ssize_t {
++        unsafe { recvfrom(fd, buf, len, flags, crate::ptr::null_mut(), crate::ptr::null_mut()) }
++    }
++    pub unsafe fn recvfrom(
++        fd: c_int,
++        buf: *mut c_void,
++        len: size_t,
++        flags: c_int,
++        addr: *mut sockaddr,
++        alen: *mut socklen_t,
++    ) -> ssize_t {
++        ret(unsafe { sys::recvfrom(fd, buf.cast(), len, flags as u32, addr.cast(), alen) })
++    }
++    pub unsafe fn sendmsg(fd: c_int, msg: *const msghdr, flags: c_int) -> ssize_t {
++        ret(unsafe { sys::sendmsg(fd, msg.cast(), flags as u32) })
++    }
++    pub unsafe fn recvmsg(fd: c_int, msg: *mut msghdr, flags: c_int) -> ssize_t {
++        ret(unsafe { sys::recvmsg(fd, msg.cast(), flags as u32) })
++    }
++    pub unsafe fn shutdown(fd: c_int, how: c_int) -> c_int {
++        ret(sys::shutdown(fd, how as u32)) as c_int
++    }
++    pub unsafe fn setsockopt(
++        fd: c_int,
++        level: c_int,
++        name: c_int,
++        val: *const c_void,
++        len: socklen_t,
++    ) -> c_int {
++        ret(unsafe { sys::setsockopt(fd, level as u32, name as u32, val.cast(), len) }) as c_int
++    }
++    pub unsafe fn getsockopt(
++        fd: c_int,
++        level: c_int,
++        name: c_int,
++        val: *mut c_void,
++        len: *mut socklen_t,
++    ) -> c_int {
++        ret(unsafe { sys::getsockopt(fd, level as u32, name as u32, val.cast(), len) }) as c_int
++    }
++    pub unsafe fn getsockname(fd: c_int, addr: *mut sockaddr, len: *mut socklen_t) -> c_int {
++        ret(unsafe { sys::getsockname(fd, addr.cast(), len) }) as c_int
++    }
++    pub unsafe fn getpeername(fd: c_int, addr: *mut sockaddr, len: *mut socklen_t) -> c_int {
++        ret(unsafe { sys::getpeername(fd, addr.cast(), len) }) as c_int
++    }
++    pub unsafe fn poll(fds: *mut pollfd, n: nfds_t, timeout_ms: c_int) -> c_int {
++        let ts = (timeout_ms >= 0).then(|| sys::Timespec {
++            sec: (timeout_ms / 1000) as i64,
++            nsec: (timeout_ms % 1000) as i64 * 1_000_000,
++        });
++        let tsp = ts.as_ref().map_or(crate::ptr::null(), |t| t as *const sys::Timespec);
++        ret(unsafe { sys::ppoll(fds.cast(), n as usize, tsp) }) as c_int
++    }
++
++    /// One `addrinfo` with the address it points to.
++    #[repr(C)]
++    struct Node {
++        ai: addrinfo,
++        addr: sockaddr_storage,
++    }
++
++    /// `getaddrinfo` for a numeric address or `localhost` (there is no
++    /// resolver). Only `node` and `hints.ai_socktype` are looked at.
++    pub unsafe fn getaddrinfo(
++        node: *const c_char,
++        _service: *const c_char,
++        hints: *const addrinfo,
++        res: *mut *mut addrinfo,
++    ) -> c_int {
++        use crate::net::{IpAddr, Ipv4Addr, Ipv6Addr};
++
++        let host = unsafe { crate::ffi::CStr::from_ptr(node) }.to_bytes();
++        let socktype = unsafe { hints.as_ref() }.map_or(0, |h| h.ai_socktype);
++        let addrs: Vec<IpAddr> = if host.eq_ignore_ascii_case(b"localhost") {
++            vec![IpAddr::V6(Ipv6Addr::LOCALHOST), IpAddr::V4(Ipv4Addr::LOCALHOST)]
++        } else {
++            match crate::str::from_utf8(host).ok().and_then(|h| h.parse::<IpAddr>().ok()) {
++                Some(a) => vec![a],
++                None => return EAI_NONAME,
++            }
++        };
++        let mut head: *mut addrinfo = crate::ptr::null_mut();
++        for ip in addrs.into_iter().rev() {
++            let (repr, len) = super::super::socket_addr_to_c(&crate::net::SocketAddr::new(ip, 0));
++            let mut node: Box<Node> = Box::new(unsafe { crate::mem::zeroed() });
++            unsafe {
++                crate::ptr::copy_nonoverlapping(
++                    repr.as_ptr().cast::<u8>(),
++                    (&raw mut node.addr).cast::<u8>(),
++                    len as usize,
++                )
++            };
++            node.ai.ai_family = if ip.is_ipv4() { AF_INET } else { AF_INET6 };
++            node.ai.ai_socktype = socktype;
++            node.ai.ai_addrlen = len;
++            node.ai.ai_next = head;
++            let node = Box::into_raw(node);
++            unsafe { (*node).ai.ai_addr = (&raw mut (*node).addr).cast() };
++            head = node.cast();
++        }
++        unsafe { *res = head };
++        0
++    }
++
++    pub unsafe fn freeaddrinfo(mut ai: *mut addrinfo) {
++        while !ai.is_null() {
++            let node = unsafe { Box::from_raw(ai.cast::<Node>()) };
++            ai = node.ai.ai_next;
++        }
++    }
++
++    pub fn gai_strerror(err: c_int) -> &'static str {
++        match err {
++            EAI_NONAME => "Name does not resolve (no DNS resolver on linux-none)",
++            _ => "Unknown error",
++        }
++    }
++}
++
++/// Converts the `-1` and errno of a [`netc`] call to an `io::Error`.
++pub fn cvt<T: IsMinusOne>(t: T) -> io::Result<T> {
++    if t.is_minus_one() { Err(io::Error::last_os_error()) } else { Ok(t) }
++}
++
++/// [`cvt`], retrying on `EINTR`.
++pub fn cvt_r<T, F>(mut f: F) -> io::Result<T>
++where
++    T: IsMinusOne,
++    F: FnMut() -> T,
++{
++    loop {
++        match cvt(f()) {
++            Err(ref e) if e.is_interrupted() => {}
++            other => return other,
++        }
++    }
++}
++
++#[doc(hidden)]
++pub trait IsMinusOne {
++    fn is_minus_one(&self) -> bool;
++}
++
++macro_rules! impl_is_minus_one {
++    ($($t:ident)*) => ($(impl IsMinusOne for $t {
++        fn is_minus_one(&self) -> bool {
++            *self == -1
++        }
++    })*)
++}
++
++impl_is_minus_one! { i8 i16 i32 i64 isize }
++
++pub struct Socket(FileDesc);
++
++pub fn init() {}
++
++pub fn cvt_gai(err: c_int) -> io::Result<()> {
++    if err == 0 {
++        return Ok(());
++    }
++    let detail = netc::gai_strerror(err);
++    Err(io::Error::new(
++        io::ErrorKind::Uncategorized,
++        &format!("failed to lookup address information: {detail}")[..],
++    ))
++}
++
++impl Socket {
++    pub fn new(family: c_int, ty: c_int) -> io::Result<Socket> {
++        let fd = cvt(unsafe { netc::socket(family, ty | libc::SOCK_CLOEXEC, 0) })?;
++        Ok(Socket(unsafe { FileDesc::from_raw_fd(fd) }))
++    }
++
++    pub fn new_pair(fam: c_int, ty: c_int) -> io::Result<(Socket, Socket)> {
++        unsafe {
++            let mut fds = [0, 0];
++            cvt(netc::socketpair(fam, ty | libc::SOCK_CLOEXEC, 0, fds.as_mut_ptr()))?;
++            Ok((Socket(FileDesc::from_raw_fd(fds[0])), Socket(FileDesc::from_raw_fd(fds[1]))))
++        }
++    }
++
++    pub fn connect(&self, addr: &SocketAddr) -> io::Result<()> {
++        let (addr, len) = socket_addr_to_c(addr);
++        loop {
++            let result = unsafe { netc::connect(self.as_raw_fd(), addr.as_ptr(), len) };
++            if result.is_minus_one() {
++                let err = crate::sys::io::errno();
++                match err {
++                    libc::EINTR => continue,
++                    libc::EISCONN => return Ok(()),
++                    _ => return Err(io::Error::from_raw_os_error(err)),
++                }
++            }
++            return Ok(());
++        }
++    }
++
++    pub fn connect_timeout(&self, addr: &SocketAddr, timeout: Duration) -> io::Result<()> {
++        self.set_nonblocking(true)?;
++        let r = unsafe {
++            let (addr, len) = socket_addr_to_c(addr);
++            cvt(netc::connect(self.as_raw_fd(), addr.as_ptr(), len))
++        };
++        self.set_nonblocking(false)?;
++
++        match r {
++            Ok(_) => return Ok(()),
++            Err(ref e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
++            Err(e) => return Err(e),
++        }
++
++        let mut pollfd = libc::pollfd { fd: self.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
++
++        if timeout.as_secs() == 0 && timeout.subsec_nanos() == 0 {
++            return Err(io::Error::ZERO_TIMEOUT);
++        }
++
++        let start = Instant::now();
++
++        loop {
++            let elapsed = start.elapsed();
++            if elapsed >= timeout {
++                return Err(io::const_error!(io::ErrorKind::TimedOut, "connection timed out"));
++            }
++
++            let timeout = timeout - elapsed;
++            let mut timeout = timeout
++                .as_secs()
++                .saturating_mul(1_000)
++                .saturating_add(timeout.subsec_nanos() as u64 / 1_000_000);
++            if timeout == 0 {
++                timeout = 1;
++            }
++
++            let timeout = cmp::min(timeout, c_int::MAX as u64) as c_int;
++
++            match unsafe { netc::poll(&mut pollfd, 1, timeout) } {
++                -1 => {
++                    let err = io::Error::last_os_error();
++                    if !err.is_interrupted() {
++                        return Err(err);
++                    }
++                }
++                0 => {}
++                _ => {
++                    if pollfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
++                        let e = self.take_error()?.unwrap_or_else(|| {
++                            io::const_error!(
++                                io::ErrorKind::Uncategorized,
++                                "no error set after POLLHUP",
++                            )
++                        });
++                        return Err(e);
++                    }
++
++                    return Ok(());
++                }
++            }
++        }
++    }
++
++    pub fn accept(&self, storage: *mut sockaddr, len: *mut socklen_t) -> io::Result<Socket> {
++        unsafe {
++            let fd = cvt_r(|| netc::accept4(self.as_raw_fd(), storage, len, libc::SOCK_CLOEXEC))?;
++            Ok(Socket(FileDesc::from_raw_fd(fd)))
++        }
++    }
++
++    pub fn duplicate(&self) -> io::Result<Socket> {
++        self.0.duplicate().map(Socket)
++    }
++
++    pub fn send_with_flags(&self, buf: &[u8], flags: c_int) -> io::Result<usize> {
++        let len = cmp::min(buf.len(), super::MAX_SEND_LEN) as wrlen_t;
++        let ret = cvt(unsafe {
++            netc::send(self.as_raw_fd(), buf.as_ptr() as *const c_void, len, flags)
++        })?;
++        Ok(ret as usize)
++    }
++
++    fn recv_with_flags(&self, mut buf: BorrowedCursor<'_, u8>, flags: c_int) -> io::Result<()> {
++        let ret = cvt(unsafe {
++            netc::recv(
++                self.as_raw_fd(),
++                buf.as_mut().as_mut_ptr() as *mut c_void,
++                buf.capacity(),
++                flags,
++            )
++        })?;
++        unsafe {
++            buf.advance(ret as usize);
++        }
++        Ok(())
++    }
++
++    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
++        let mut buf = BorrowedBuf::from(buf);
++        self.recv_with_flags(buf.unfilled(), 0)?;
++        Ok(buf.len())
++    }
++
++    pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
++        let mut buf = BorrowedBuf::from(buf);
++        self.recv_with_flags(buf.unfilled(), MSG_PEEK)?;
++        Ok(buf.len())
++    }
++
++    pub fn read_buf(&self, buf: BorrowedCursor<'_, u8>) -> io::Result<()> {
++        self.recv_with_flags(buf, 0)
++    }
++
++    pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
++        self.0.read_vectored(bufs)
++    }
++
++    #[inline]
++    pub fn is_read_vectored(&self) -> bool {
++        self.0.is_read_vectored()
++    }
++
++    fn recv_from_with_flags(
++        &self,
++        buf: &mut [u8],
++        flags: c_int,
++    ) -> io::Result<(usize, SocketAddr)> {
++        let mut storage: mem::MaybeUninit<libc::sockaddr_storage> = mem::MaybeUninit::uninit();
++        let mut addrlen = size_of_val(&storage) as libc::socklen_t;
++
++        let n = cvt(unsafe {
++            netc::recvfrom(
++                self.as_raw_fd(),
++                buf.as_mut_ptr() as *mut c_void,
++                buf.len(),
++                flags,
++                (&raw mut storage) as *mut _,
++                &mut addrlen,
++            )
++        })?;
++        Ok((n as usize, unsafe { super::socket_addr_from_c(storage.as_ptr(), addrlen as usize)? }))
++    }
++
++    pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
++        self.recv_from_with_flags(buf, 0)
++    }
++
++    pub fn recv_msg(&self, msg: &mut libc::msghdr) -> io::Result<usize> {
++        let n = cvt(unsafe { netc::recvmsg(self.as_raw_fd(), msg, libc::MSG_CMSG_CLOEXEC) })?;
++        Ok(n as usize)
++    }
++
++    pub fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
++        self.recv_from_with_flags(buf, MSG_PEEK)
++    }
++
++    pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
++        self.0.write(buf)
++    }
++
++    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
++        self.0.write_vectored(bufs)
++    }
++
++    #[inline]
++    pub fn is_write_vectored(&self) -> bool {
++        self.0.is_write_vectored()
++    }
++
++    pub fn send_msg(&self, msg: &mut libc::msghdr) -> io::Result<usize> {
++        let n = cvt(unsafe { netc::sendmsg(self.as_raw_fd(), msg, 0) })?;
++        Ok(n as usize)
++    }
++
++    pub fn set_timeout(&self, dur: Option<Duration>, kind: libc::c_int) -> io::Result<()> {
++        let timeout = match dur {
++            Some(dur) => {
++                if dur.as_secs() == 0 && dur.subsec_nanos() == 0 {
++                    return Err(io::Error::ZERO_TIMEOUT);
++                }
++
++                let secs = if dur.as_secs() > libc::time_t::MAX as u64 {
++                    libc::time_t::MAX
++                } else {
++                    dur.as_secs() as libc::time_t
++                };
++                let mut timeout = libc::timeval { tv_sec: secs, tv_usec: dur.subsec_micros() as _ };
++                if timeout.tv_sec == 0 && timeout.tv_usec == 0 {
++                    timeout.tv_usec = 1;
++                }
++                timeout
++            }
++            None => libc::timeval { tv_sec: 0, tv_usec: 0 },
++        };
++        unsafe { setsockopt(self, libc::SOL_SOCKET, kind, timeout) }
++    }
++
++    pub fn timeout(&self, kind: libc::c_int) -> io::Result<Option<Duration>> {
++        let raw: libc::timeval = unsafe { getsockopt(self, libc::SOL_SOCKET, kind)? };
++        if raw.tv_sec == 0 && raw.tv_usec == 0 {
++            Ok(None)
++        } else {
++            let sec = raw.tv_sec as u64;
++            let nsec = (raw.tv_usec as u32) * 1000;
++            Ok(Some(Duration::new(sec, nsec)))
++        }
++    }
++
++    pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
++        let how = match how {
++            Shutdown::Write => libc::SHUT_WR,
++            Shutdown::Read => libc::SHUT_RD,
++            Shutdown::Both => libc::SHUT_RDWR,
++        };
++        cvt(unsafe { netc::shutdown(self.as_raw_fd(), how) })?;
++        Ok(())
++    }
++
++    pub fn set_linger(&self, linger: Option<Duration>) -> io::Result<()> {
++        let linger = libc::linger {
++            l_onoff: linger.is_some() as c_int,
++            l_linger: cmp::min(linger.unwrap_or_default().as_secs(), c_int::MAX as u64) as c_int,
++        };
++
++        unsafe { setsockopt(self, libc::SOL_SOCKET, libc::SO_LINGER, linger) }
++    }
++
++    pub fn linger(&self) -> io::Result<Option<Duration>> {
++        let val: libc::linger = unsafe { getsockopt(self, libc::SOL_SOCKET, libc::SO_LINGER)? };
++
++        Ok((val.l_onoff != 0).then(|| Duration::from_secs(val.l_linger as u64)))
++    }
++
++    pub fn set_keepalive(&self, keepalive: bool) -> io::Result<()> {
++        unsafe { setsockopt(self, libc::SOL_SOCKET, libc::SO_KEEPALIVE, keepalive as c_int) }
++    }
++
++    pub fn keepalive(&self) -> io::Result<bool> {
++        let raw: c_int = unsafe { getsockopt(self, libc::SOL_SOCKET, libc::SO_KEEPALIVE)? };
++        Ok(raw != 0)
++    }
++
++    pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
++        unsafe { setsockopt(self, libc::IPPROTO_TCP, libc::TCP_NODELAY, nodelay as c_int) }
++    }
++
++    pub fn nodelay(&self) -> io::Result<bool> {
++        let raw: c_int = unsafe { getsockopt(self, libc::IPPROTO_TCP, libc::TCP_NODELAY)? };
++        Ok(raw != 0)
++    }
++
++    pub fn set_quickack(&self, quickack: bool) -> io::Result<()> {
++        unsafe { setsockopt(self, libc::IPPROTO_TCP, libc::TCP_QUICKACK, quickack as c_int) }
++    }
++
++    pub fn quickack(&self) -> io::Result<bool> {
++        let raw: c_int = unsafe { getsockopt(self, libc::IPPROTO_TCP, libc::TCP_QUICKACK)? };
++        Ok(raw != 0)
++    }
++
++    pub fn set_deferaccept(&self, accept: Duration) -> io::Result<()> {
++        let val = cmp::min(accept.as_secs(), c_int::MAX as u64) as c_int;
++        unsafe { setsockopt(self, libc::IPPROTO_TCP, libc::TCP_DEFER_ACCEPT, val) }
++    }
++
++    pub fn deferaccept(&self) -> io::Result<Duration> {
++        let raw: c_int = unsafe { getsockopt(self, libc::IPPROTO_TCP, libc::TCP_DEFER_ACCEPT)? };
++        Ok(Duration::from_secs(raw as _))
++    }
++
++    pub fn set_passcred(&self, passcred: bool) -> io::Result<()> {
++        unsafe { setsockopt(self, libc::SOL_SOCKET, libc::SO_PASSCRED, passcred as libc::c_int) }
++    }
++
++    pub fn passcred(&self) -> io::Result<bool> {
++        let passcred: libc::c_int =
++            unsafe { getsockopt(self, libc::SOL_SOCKET, libc::SO_PASSCRED)? };
++        Ok(passcred != 0)
++    }
++
++    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
++        self.0.set_nonblocking(nonblocking)
++    }
++
++    pub fn set_mark(&self, mark: u32) -> io::Result<()> {
++        unsafe { setsockopt(self, libc::SOL_SOCKET, libc::SO_MARK, mark as libc::c_int) }
++    }
++
++    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
++        let raw: c_int = unsafe { getsockopt(self, libc::SOL_SOCKET, libc::SO_ERROR)? };
++        if raw == 0 { Ok(None) } else { Ok(Some(io::Error::from_raw_os_error(raw as i32))) }
++    }
++
++    pub fn as_raw(&self) -> RawFd {
++        self.as_raw_fd()
++    }
++}
++
++impl AsInner<FileDesc> for Socket {
++    #[inline]
++    fn as_inner(&self) -> &FileDesc {
++        &self.0
++    }
++}
++
++impl IntoInner<FileDesc> for Socket {
++    fn into_inner(self) -> FileDesc {
++        self.0
++    }
++}
++
++impl FromInner<FileDesc> for Socket {
++    fn from_inner(file_desc: FileDesc) -> Self {
++        Self(file_desc)
++    }
++}
++
++impl AsFd for Socket {
++    fn as_fd(&self) -> BorrowedFd<'_> {
++        self.0.as_fd()
++    }
++}
++
++impl AsRawFd for Socket {
++    #[inline]
++    fn as_raw_fd(&self) -> RawFd {
++        self.0.as_raw_fd()
++    }
++}
++
++impl IntoRawFd for Socket {
++    fn into_raw_fd(self) -> RawFd {
++        self.0.into_raw_fd()
++    }
++}
++
++impl FromRawFd for Socket {
++    unsafe fn from_raw_fd(raw_fd: RawFd) -> Self {
++        Self(FromRawFd::from_raw_fd(raw_fd))
++    }
++}
+diff --git a/library/std/src/sys/net/connection/socket/mod.rs b/library/std/src/sys/net/connection/socket/mod.rs
+index 9defc24..2c34dbf 100644
+--- a/library/std/src/sys/net/connection/socket/mod.rs
++++ b/library/std/src/sys/net/connection/socket/mod.rs
+@@ -23,6 +23,10 @@ cfg_select! {
+         mod solid;
+         pub use solid::*;
+     }
++    linux_none => {
++        mod linux_none;
++        pub use linux_none::*;
++    }
+     any(target_family = "unix", target_os = "wasi") => {
+         mod unix;
+         pub use unix::*;
+diff --git a/library/std/src/sys/net/hostname/linux_none.rs b/library/std/src/sys/net/hostname/linux_none.rs
+new file mode 100644
+index 0000000..44e50b6
+--- /dev/null
++++ b/library/std/src/sys/net/hostname/linux_none.rs
+@@ -0,0 +1,12 @@
++use crate::ffi::OsString;
++use crate::io;
++use crate::os::unix::ffi::OsStringExt;
++
++/// The node name from `uname(2)`, which is what `gethostname` returns.
++pub fn hostname() -> io::Result<OsString> {
++    let mut uts: libc::utsname = unsafe { crate::mem::zeroed() };
++    crate::sys::cvt(unsafe { linux_none_rt::sys::uname((&raw mut uts).cast()) })?;
++    let name = &uts.nodename;
++    let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
++    Ok(OsString::from_vec(name[..len].iter().map(|&c| c as u8).collect()))
++}
+diff --git a/library/std/src/sys/net/hostname/mod.rs b/library/std/src/sys/net/hostname/mod.rs
+index 65fcd6b..faea4b3 100644
+--- a/library/std/src/sys/net/hostname/mod.rs
++++ b/library/std/src/sys/net/hostname/mod.rs
+@@ -1,4 +1,8 @@
+ cfg_select! {
++    linux_none => {
++        mod linux_none;
++        pub use linux_none::hostname;
++    }
+     all(target_family = "unix", not(target_os = "espidf")) => {
+         mod unix;
+         pub use unix::hostname;
+diff --git a/library/std/src/sys/pal/linux_none/futex.rs b/library/std/src/sys/pal/linux_none/futex.rs
+new file mode 100644
+index 0000000..763980d
+--- /dev/null
++++ b/library/std/src/sys/pal/linux_none/futex.rs
+@@ -0,0 +1,56 @@
++use linux_none_rt::sys;
++
++use crate::sync::atomic::Atomic;
++use crate::sync::atomic::Ordering::Relaxed;
++use crate::sys::pal::time::Timespec;
++use crate::time::Duration;
++
++/// An atomic for use as a futex that is at least 32-bits but may be larger
++pub type Futex = Atomic<Primitive>;
++/// Must be the underlying type of Futex
++pub type Primitive = u32;
++
++/// An atomic for use as a futex that is at least 8-bits but may be larger.
++pub type SmallFutex = Atomic<SmallPrimitive>;
++/// Must be the underlying type of SmallFutex
++pub type SmallPrimitive = u32;
++
++/// Waits for a `futex_wake` operation to wake us.
++///
++/// Returns directly if the futex doesn't hold the expected value.
++///
++/// Returns false on timeout, and true in all other cases.
++pub fn futex_wait(futex: &Atomic<u32>, expected: u32, timeout: Option<Duration>) -> bool {
++    // An absolute deadline, so that retrying after EINTR does not extend the
++    // wait. Overflows are rounded up to an infinite timeout (None).
++    let deadline = timeout
++        .and_then(|d| Timespec::now(libc::CLOCK_MONOTONIC).checked_add_duration(&d))
++        .and_then(|t| t.to_timespec())
++        .map(|t| sys::Timespec { sec: t.tv_sec, nsec: t.tv_nsec });
++
++    loop {
++        // No need to wait if the value already changed.
++        if futex.load(Relaxed) != expected {
++            return true;
++        }
++        let ts = deadline.as_ref().map_or(crate::ptr::null(), |t| t as *const sys::Timespec);
++        match unsafe { sys::futex_wait_abs(futex.as_ptr(), expected, ts) } {
++            Err(sys::ETIMEDOUT) => return false,
++            Err(sys::EINTR) => continue,
++            _ => return true,
++        }
++    }
++}
++
++/// Wakes up one thread that's blocked on `futex_wait` on this futex.
++///
++/// Returns true if this actually woke up such a thread,
++/// or false if no thread was waiting on this futex.
++pub fn futex_wake(futex: &Atomic<u32>) -> bool {
++    linux_none_rt::futex::wake_one(futex)
++}
++
++/// Wakes up all threads that are waiting on `futex_wait` on this futex.
++pub fn futex_wake_all(futex: &Atomic<u32>) {
++    linux_none_rt::futex::wake_all(futex)
++}
+diff --git a/library/std/src/sys/pal/linux_none/mod.rs b/library/std/src/sys/pal/linux_none/mod.rs
+new file mode 100644
+index 0000000..7f7362b
+--- /dev/null
++++ b/library/std/src/sys/pal/linux_none/mod.rs
+@@ -0,0 +1,120 @@
++//! Linux without libc (`*-unknown-linux-none`): std on raw syscalls.
++//!
++//! `linux_none_rt` is the C runtime here: it defines `_start`, which records
++//! the arguments, sets up the main thread's TLS and calls the C `main` rustc
++//! generates (and so `lang_start`, which calls [`init`]). It also provides the
++//! syscall wrappers, threads, process spawning and the allocator that the
++//! `linux_none` arms of the `sys` modules are built on.
++//!
++//! The `libc` crate is still a dependency, for the types and constants that
++//! `os::unix` and `os::linux` expose (it gives linux-none musl's, which match
++//! the kernel's), but no libc function is called.
++
++#![allow(missing_docs, nonstandard_style)]
++#![forbid(unsafe_op_in_unsafe_fn)]
++
++use linux_none_rt::sys;
++
++use crate::io;
++use crate::sync::atomic::{AtomicBool, Ordering};
++
++pub mod futex;
++#[path = "../unix/time.rs"]
++pub mod time;
++
++static ON_BROKEN_PIPE_USED: AtomicBool = AtomicBool::new(false);
++
++// SAFETY: must be called only once during runtime initialization.
++pub unsafe fn init(argc: isize, argv: *const *const u8, sigpipe: u8) {
++    sanitize_standard_fds();
++    reset_sigpipe(sigpipe);
++    unsafe { crate::sys::args::init(argc, argv) };
++    // libc's `exit` runs the exiting thread's TLS destructors: so does ours
++    linux_none_rt::start::set_exit_hook(run_thread_exit);
++}
++
++/// Make sure fds 0, 1 and 2 are open, so that files opened later never end
++/// up as stdio by accident.
++fn sanitize_standard_fds() {
++    for fd in 0..3 {
++        if let Err(sys::EBADF) = sys::fcntl(fd, sys::F_GETFD, 0) {
++            let r = unsafe { sys::openat(sys::AT_FDCWD, c"/dev/null".as_ptr().cast(), sys::O_RDWR, 0) };
++            if r.is_err() {
++                abort_internal();
++            }
++        }
++    }
++}
++
++fn reset_sigpipe(sigpipe: u8) {
++    mod sigpipe {
++        pub const DEFAULT: u8 = 0;
++        pub const INHERIT: u8 = 1;
++        pub const SIG_IGN: u8 = 2;
++        pub const SIG_DFL: u8 = 3;
++    }
++    let (used, handler) = match sigpipe {
++        sigpipe::DEFAULT => (false, Some(sys::SIG_IGN)),
++        sigpipe::INHERIT => (true, None),
++        sigpipe::SIG_IGN => (true, Some(sys::SIG_IGN)),
++        sigpipe::SIG_DFL => (true, Some(sys::SIG_DFL)),
++        _ => unreachable!(),
++    };
++    if used {
++        ON_BROKEN_PIPE_USED.store(true, Ordering::Relaxed);
++    }
++    if let Some(handler) = handler {
++        let act = linux_none_rt::arch::KSigaction { handler, flags: 0, restorer: 0, mask: 0 };
++        if unsafe { sys::rt_sigaction(sys::SIGPIPE, &act, crate::ptr::null_mut()) }.is_err() {
++            rtabort!("failed to set the SIGPIPE disposition");
++        }
++    }
++}
++
++pub(crate) fn on_broken_pipe_used() -> bool {
++    ON_BROKEN_PIPE_USED.load(Ordering::Relaxed)
++}
++
++/// What a thread does on its way out: run its TLS destructors, then std's
++/// per-thread cleanup. Spawned threads call it after their main function;
++/// `linux_none_rt::start::exit` calls it for the thread that exits the
++/// process.
++pub(crate) fn run_thread_exit() {
++    unsafe { crate::sys::thread_local::destructors::run() };
++    crate::rt::thread_cleanup();
++}
++
++// SAFETY: must be called only once during runtime cleanup.
++pub unsafe fn cleanup() {}
++
++/// Converts the `Err(errno)` of a syscall wrapper to an `io::Error` (and
++/// records the errno for `io::Error::last_os_error`).
++#[inline]
++pub fn cvt<T>(r: Result<T, i32>) -> io::Result<T> {
++    r.map_err(|e| {
++        crate::sys::io::set_errno(e);
++        io::Error::from_raw_os_error(e)
++    })
++}
++
++/// [`cvt`], retrying while the call fails with `EINTR`.
++pub fn cvt_r<T>(mut f: impl FnMut() -> Result<T, i32>) -> io::Result<T> {
++    loop {
++        match f() {
++            Err(sys::EINTR) => {}
++            r => return cvt(r),
++        }
++    }
++}
++
++pub fn abort_internal() -> ! {
++    linux_none_rt::start::abort()
++}
++
++pub fn unsupported<T>() -> io::Result<T> {
++    Err(unsupported_err())
++}
++
++pub fn unsupported_err() -> io::Error {
++    io::Error::UNSUPPORTED_PLATFORM
++}
+diff --git a/library/std/src/sys/pal/mod.rs b/library/std/src/sys/pal/mod.rs
+index 88d9d42..c2cdabb 100644
+--- a/library/std/src/sys/pal/mod.rs
++++ b/library/std/src/sys/pal/mod.rs
+@@ -4,6 +4,10 @@
+ #![allow(missing_debug_implementations)]
+ 
+ cfg_select! {
++    linux_none => {
++        mod linux_none;
++        pub use self::linux_none::*;
++    }
+     unix => {
+         mod unix;
+         pub use self::unix::*;
+diff --git a/library/std/src/sys/pal/unix/time.rs b/library/std/src/sys/pal/unix/time.rs
+index 9c4ba9f..7e8b61a 100644
+--- a/library/std/src/sys/pal/unix/time.rs
++++ b/library/std/src/sys/pal/unix/time.rs
+@@ -73,7 +73,9 @@ impl Timespec {
+ 
+     #[allow(dead_code)]
+     pub fn now(clock: libc::clockid_t) -> Timespec {
++        #[cfg(not(linux_none))]
+         use crate::mem::MaybeUninit;
++        #[cfg(not(linux_none))]
+         use crate::sys::cvt;
+ 
+         // Try to use 64-bit time in preparation for Y2038.
+@@ -103,10 +105,19 @@ impl Timespec {
+             }
+         }
+ 
+-        let mut t = MaybeUninit::uninit();
+-        cvt(unsafe { libc::clock_gettime(clock, t.as_mut_ptr()) }).unwrap();
+-        let t = unsafe { t.assume_init() };
+-        Timespec::new(t.tv_sec as i64, t.tv_nsec as i64).unwrap()
++        #[cfg(linux_none)]
++        {
++            let t = linux_none_rt::sys::clock_gettime(clock as usize);
++            Timespec::new(t.sec, t.nsec).unwrap()
++        }
++
++        #[cfg(not(linux_none))]
++        {
++            let mut t = MaybeUninit::uninit();
++            cvt(unsafe { libc::clock_gettime(clock, t.as_mut_ptr()) }).unwrap();
++            let t = unsafe { t.assume_init() };
++            Timespec::new(t.tv_sec as i64, t.tv_nsec as i64).unwrap()
++        }
+     }
+ 
+     pub fn sub_timespec(&self, other: &Timespec) -> Result<Duration, Duration> {
+diff --git a/library/std/src/sys/paths/unix.rs b/library/std/src/sys/paths/unix.rs
+index e023451..dabe06d 100644
+--- a/library/std/src/sys/paths/unix.rs
++++ b/library/std/src/sys/paths/unix.rs
+@@ -18,7 +18,24 @@ pub fn getcwd() -> io::Result<PathBuf> {
+     Ok(PathBuf::from("/"))
+ }
+ 
+-#[cfg(not(target_os = "espidf"))]
++#[cfg(linux_none)]
++pub fn getcwd() -> io::Result<PathBuf> {
++    let mut buf = Vec::with_capacity(512);
++    loop {
++        match unsafe { linux_none_rt::sys::getcwd(buf.as_mut_ptr(), buf.capacity()) } {
++            // the length includes the terminating NUL
++            Ok(len) => {
++                unsafe { buf.set_len(len.saturating_sub(1)) };
++                buf.shrink_to_fit();
++                return Ok(PathBuf::from(OsString::from_vec(buf)));
++            }
++            Err(libc::ERANGE) => buf.reserve(buf.capacity() * 2),
++            Err(e) => return Err(io::Error::from_raw_os_error(e)),
++        }
++    }
++}
++
++#[cfg(not(any(target_os = "espidf", linux_none)))]
+ pub fn getcwd() -> io::Result<PathBuf> {
+     let mut buf = Vec::with_capacity(512);
+     loop {
+@@ -50,7 +67,12 @@ pub fn chdir(_p: &path::Path) -> io::Result<()> {
+     crate::sys::pal::unsupported()
+ }
+ 
+-#[cfg(not(target_os = "espidf"))]
++#[cfg(linux_none)]
++pub fn chdir(p: &path::Path) -> io::Result<()> {
++    run_path_with_cstr(p, &|p| cvt(unsafe { linux_none_rt::sys::chdir(p.as_ptr().cast()) }).map(drop))
++}
++
++#[cfg(not(any(target_os = "espidf", linux_none)))]
+ pub fn chdir(p: &path::Path) -> io::Result<()> {
+     let result = run_path_with_cstr(p, &|p| unsafe { Ok(libc::chdir(p.as_ptr())) })?;
+     if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+@@ -443,6 +465,7 @@ pub fn home_dir() -> Option<PathBuf> {
+         target_os = "vita",
+         target_os = "nuttx",
+         all(target_vendor = "apple", not(target_os = "macos")),
++        linux_none, // no passwd database without libc
+     ))]
+     unsafe fn fallback() -> Option<OsString> {
+         None
+@@ -457,6 +480,7 @@ pub fn home_dir() -> Option<PathBuf> {
+         target_os = "vita",
+         target_os = "nuttx",
+         all(target_vendor = "apple", not(target_os = "macos")),
++        linux_none,
+     )))]
+     unsafe fn fallback() -> Option<OsString> {
+         let amt = match libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) {
+diff --git a/library/std/src/sys/pipe/unix.rs b/library/std/src/sys/pipe/unix.rs
+index 86397ec..6243a89 100644
+--- a/library/std/src/sys/pipe/unix.rs
++++ b/library/std/src/sys/pipe/unix.rs
+@@ -12,6 +12,10 @@ pub fn pipe() -> io::Result<(Pipe, Pipe)> {
+     // to use the `pipe2` syscall. This was added to Linux in 2.6.27, glibc 2.9
+     // and musl 0.9.3, and some other targets also have it.
+     cfg_select! {
++        linux_none => unsafe {
++            fds = cvt(linux_none_rt::sys::pipe2(libc::O_CLOEXEC as u32))?;
++            Ok((Pipe::from_raw_fd(fds[0]), Pipe::from_raw_fd(fds[1])))
++        },
+         any(
+             target_os = "android",
+             target_os = "dragonfly",
+diff --git a/library/std/src/sys/process/unix/common.rs b/library/std/src/sys/process/unix/common.rs
+index 4f281a4..68529d0 100644
+--- a/library/std/src/sys/process/unix/common.rs
++++ b/library/std/src/sys/process/unix/common.rs
+@@ -655,7 +655,10 @@ pub fn read_output(
+     fds[1].events = libc::POLLIN;
+     loop {
+         // wait for either pipe to become readable using `poll`
++        #[cfg(not(linux_none))]
+         cvt_r(|| unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) })?;
++        #[cfg(linux_none)]
++        cvt_r(|| unsafe { linux_none_rt::sys::ppoll(fds.as_mut_ptr().cast(), 2, crate::ptr::null()) })?;
+ 
+         if fds[0].revents != 0 && read(&out, stdout)? {
+             err.set_nonblocking(false)?;
+@@ -688,10 +691,15 @@ pub fn read_output(
+     }
+ }
+ 
++#[cfg(not(linux_none))]
+ pub fn getpid() -> u32 {
+     unsafe { libc::getpid() as u32 }
+ }
+ 
++#[cfg(not(linux_none))]
+ pub fn getppid() -> u32 {
+     unsafe { libc::getppid() as u32 }
+ }
++
++#[cfg(linux_none)]
++pub use linux_none_rt::sys::{getpid, getppid};
+diff --git a/library/std/src/sys/process/unix/linux_none.rs b/library/std/src/sys/process/unix/linux_none.rs
+new file mode 100644
+index 0000000..aace917
+--- /dev/null
++++ b/library/std/src/sys/process/unix/linux_none.rs
+@@ -0,0 +1,527 @@
++//! Spawning and waiting on linux-none: `linux_none_rt::process` starts the
++//! child (`clone` + `execve`, searching `PATH` like `execvp`); `ExitStatus`
++//! and the rest follow unix.rs.
++
++use libc::{c_int, pid_t};
++use linux_none_rt::process::{self as rt, Fd};
++use linux_none_rt::sys as rsys;
++
++use super::common::*;
++use crate::ffi::CStr;
++use crate::io::{self, ErrorKind};
++use crate::num::NonZero;
++use crate::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
++use crate::process::StdioPipes;
++use crate::sys::fd::FileDesc;
++use crate::sys::{AsInner, FromInner, IntoInner, cvt, cvt_r};
++use crate::{fmt, sys};
++
++/// `execvp`'s search path when the environment has no `PATH` (musl's).
++const DEFAULT_PATH: &[u8] = b"/usr/local/bin:/bin:/usr/bin";
++
++////////////////////////////////////////////////////////////////////////////////
++// Command
++////////////////////////////////////////////////////////////////////////////////
++
++impl Command {
++    pub fn spawn(
++        &mut self,
++        default: Stdio,
++        needs_stdin: bool,
++    ) -> io::Result<(Process, StdioPipes)> {
++        let envp = self.capture_env();
++
++        if self.saw_nul() {
++            return Err(io::const_error!(
++                ErrorKind::InvalidInput,
++                "nul byte found in provided data",
++            ));
++        }
++
++        let (ours, theirs) = self.setup_io(default, needs_stdin)?;
++
++        // the child reads PATH, and the parent's environ when it is
++        // inherited: keep setenv out until it has exec'd
++        let env_lock = sys::env::env_read_lock();
++        let pid = self.with_spawn(&theirs, envp.as_ref(), |s| cvt(unsafe { rt::spawn(s) }))?;
++        drop(env_lock);
++
++        let pidfd = if self.get_create_pidfd() {
++            // the child cannot be reaped (and its pid reused) before we wait for it
++            rsys::pidfd_open(pid, 0).ok()
++        } else {
++            None
++        };
++        let p = unsafe { Process::new(pid, pidfd.unwrap_or(-1)) };
++        Ok((p, ours))
++    }
++
++    pub fn exec(&mut self, default: Stdio) -> io::Error {
++        let envp = self.capture_env();
++
++        if self.saw_nul() {
++            return io::const_error!(ErrorKind::InvalidInput, "nul byte found in provided data");
++        }
++
++        match self.setup_io(default, true) {
++            Ok((_, theirs)) => {
++                let _lock = sys::env::env_read_lock();
++                let r: io::Result<!> = self.with_spawn(&theirs, envp.as_ref(), |s| {
++                    Err(io::Error::from_raw_os_error(unsafe { rt::exec(s) }))
++                });
++                let Err(e) = r;
++                e
++            }
++            Err(e) => e,
++        }
++    }
++
++    /// Describe the child to `linux_none_rt::process` and call `f` with it.
++    fn with_spawn<T>(
++        &mut self,
++        stdio: &ChildPipes,
++        envp: Option<&CStringArray>,
++        f: impl FnOnce(&mut rt::Spawn<'_>) -> io::Result<T>,
++    ) -> io::Result<T> {
++        let envp = match envp {
++            Some(e) => e.as_ptr().cast(),
++            None => sys::env::environ().cast(),
++        };
++        let fd = |c: &ChildStdio| c.fd().map_or(Fd::Inherit, Fd::Dup);
++        let stdio = [fd(&stdio.stdin), fd(&stdio.stdout), fd(&stdio.stderr)];
++
++        // `execvp` searches the child's PATH
++        let path: Option<Vec<u8>> = if self.program_is_path() {
++            None
++        } else {
++            Some(child_env_path(envp).unwrap_or_else(|| DEFAULT_PATH.to_vec()))
++        };
++
++        let program = self.get_program_cstr().as_ptr().cast();
++        let argv = self.get_argv().as_ptr().cast();
++        let cwd = self.get_cwd().map(|c| c.as_ptr().cast());
++        let chroot = self.get_chroot().map(|c| c.as_ptr().cast());
++        let (uid, gid, pgroup, setsid) =
++            (self.get_uid(), self.get_gid(), self.get_pgroup(), self.get_setsid());
++        let groups: Option<Vec<u32>> = self.get_groups().map(|g| g.to_vec());
++
++        let closures = self.get_closures();
++        let has_closures = !closures.is_empty();
++        let mut run_closures = || -> Result<(), i32> {
++            for callback in closures.iter_mut() {
++                callback().map_err(|e| e.raw_os_error().unwrap_or(libc::EINVAL))?;
++            }
++            Ok(())
++        };
++
++        let mut s = rt::Spawn {
++            program,
++            search_path: path.as_deref(),
++            argv,
++            envp,
++            chroot,
++            cwd,
++            stdio,
++            uid,
++            gid,
++            groups: groups.as_deref(),
++            pgroup,
++            setsid,
++            reset_sigpipe: !crate::sys::pal::on_broken_pipe_used(),
++            pre_exec: if has_closures { Some(&mut run_closures) } else { None },
++        };
++        f(&mut s)
++    }
++}
++
++/// The `PATH` in a null-terminated `KEY=VALUE` array.
++fn child_env_path(envp: *const *const u8) -> Option<Vec<u8>> {
++    let mut p = envp;
++    unsafe {
++        while !p.is_null() && !(*p).is_null() {
++            let entry = CStr::from_ptr((*p).cast()).to_bytes();
++            if let Some(v) = entry.strip_prefix(b"PATH=") {
++                return Some(v.to_vec());
++            }
++            p = p.add(1);
++        }
++    }
++    None
++}
++
++////////////////////////////////////////////////////////////////////////////////
++// Processes
++////////////////////////////////////////////////////////////////////////////////
++
++/// The unique ID of the process (this should never be negative).
++pub struct Process {
++    pid: pid_t,
++    status: Option<ExitStatus>,
++    // Stores the pidfd created for this child, if the user requested one and
++    // `pidfd_open` succeeded.
++    pidfd: Option<PidFd>,
++}
++
++impl Process {
++    /// # Safety
++    ///
++    /// `pidfd` must either be -1 (representing no file descriptor) or a valid, exclusively owned file
++    /// descriptor (See [I/O Safety]).
++    ///
++    /// [I/O Safety]: crate::io#io-safety
++    unsafe fn new(pid: pid_t, pidfd: pid_t) -> Self {
++        // Safety: If `pidfd` is nonnegative, we assume it's valid and otherwise unowned.
++        let pidfd = (pidfd >= 0).then(|| PidFd::from_inner(unsafe { FileDesc::from_raw_fd(pidfd) }));
++        Process { pid, status: None, pidfd }
++    }
++
++    pub fn id(&self) -> u32 {
++        self.pid as u32
++    }
++
++    pub fn kill(&self) -> io::Result<()> {
++        self.send_signal(libc::SIGKILL)
++    }
++
++    pub(crate) fn send_signal(&self, signal: i32) -> io::Result<()> {
++        // If we've already waited on this process then the pid can be recycled and
++        // used for another process, and we probably shouldn't be sending signals to
++        // random processes, so return Ok because the process has exited already.
++        if self.status.is_some() {
++            return Ok(());
++        }
++        if let Some(pid_fd) = self.pidfd.as_ref() {
++            return pid_fd.send_signal(signal);
++        }
++        cvt(rsys::kill(self.pid, signal as usize)).map(drop)
++    }
++
++    pub(crate) fn send_process_group_signal(&self, signal: i32) -> io::Result<()> {
++        // See note in `send_signal` regarding recycled PIDs.
++        if self.status.is_some() {
++            return Ok(());
++        }
++        if let Some(pid_fd) = self.pidfd.as_ref() {
++            // The `PIDFD_SIGNAL_PROCESS_GROUP` flag requires kernel >= 6.9
++            return pid_fd.send_process_group_signal(signal);
++        }
++        // killpg
++        cvt(rsys::kill(-self.pid, signal as usize)).map(drop)
++    }
++
++    pub fn wait(&mut self) -> io::Result<ExitStatus> {
++        if let Some(status) = self.status {
++            return Ok(status);
++        }
++        if let Some(pid_fd) = self.pidfd.as_ref() {
++            let status = pid_fd.wait()?;
++            self.status = Some(status);
++            return Ok(status);
++        }
++        let mut status = 0 as c_int;
++        cvt_r(|| unsafe { rsys::wait4(self.pid, &mut status, 0) })?;
++        self.status = Some(ExitStatus::new(status));
++        Ok(ExitStatus::new(status))
++    }
++
++    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
++        if let Some(status) = self.status {
++            return Ok(Some(status));
++        }
++        if let Some(pid_fd) = self.pidfd.as_ref() {
++            let status = pid_fd.try_wait()?;
++            if let Some(status) = status {
++                self.status = Some(status)
++            }
++            return Ok(status);
++        }
++        let mut status = 0 as c_int;
++        let pid = cvt(unsafe { rsys::wait4(self.pid, &mut status, libc::WNOHANG as u32) })?;
++        if pid == 0 {
++            Ok(None)
++        } else {
++            self.status = Some(ExitStatus::new(status));
++            Ok(Some(ExitStatus::new(status)))
++        }
++    }
++}
++
++////////////////////////////////////////////////////////////////////////////////
++// PidFd
++////////////////////////////////////////////////////////////////////////////////
++
++const PIDFD_SIGNAL_PROCESS_GROUP: u32 = 1 << 2;
++const P_PIDFD: u32 = 3;
++
++#[derive(Debug)]
++pub struct PidFd(FileDesc);
++
++impl PidFd {
++    pub fn kill(&self) -> io::Result<()> {
++        self.send_signal(libc::SIGKILL)
++    }
++
++    #[cfg(test)]
++    pub fn current_process() -> io::Result<PidFd> {
++        let pid = crate::process::id();
++        let pidfd = cvt(rsys::pidfd_open(pid as i32, 0))?;
++        Ok(unsafe { PidFd::from_raw_fd(pidfd as RawFd) })
++    }
++
++    #[cfg(test)]
++    pub fn pid(&self) -> io::Result<u32> {
++        // since kernel 6.13
++        let mut pidfd_info: libc::pidfd_info = unsafe { crate::mem::zeroed() };
++        pidfd_info.mask = libc::PIDFD_INFO_PID as u64;
++        self.get_info(&mut pidfd_info)?;
++        Ok(pidfd_info.pid)
++    }
++
++    fn get_info(&self, info: &mut libc::pidfd_info) -> io::Result<()> {
++        let req = libc::PIDFD_GET_INFO as usize;
++        cvt(unsafe { rsys::ioctl(self.0.as_raw_fd(), req, info as *mut _ as usize) }).map(drop)
++    }
++
++    fn exit_for_reaped_child(&self) -> io::Result<ExitStatus> {
++        // since kernel 6.15
++        let mut pidfd_info: libc::pidfd_info = unsafe { crate::mem::zeroed() };
++        pidfd_info.mask = libc::PIDFD_INFO_EXIT as u64;
++        self.get_info(&mut pidfd_info)?;
++        Ok(ExitStatus::new(pidfd_info.exit_code))
++    }
++
++    fn waitid(&self, options: c_int) -> io::Result<Option<ExitStatus>> {
++        let mut siginfo: libc::siginfo_t = unsafe { crate::mem::zeroed() };
++        let r = cvt_r(|| unsafe {
++            rsys::waitid(
++                P_PIDFD,
++                self.0.as_raw_fd() as u32,
++                (&raw mut siginfo).cast(),
++                options as u32,
++            )
++        });
++        match r {
++            Err(waitid_err) if waitid_err.raw_os_error() == Some(libc::ECHILD) => {
++                // already reaped
++                match self.exit_for_reaped_child() {
++                    Ok(exit_status) => return Ok(Some(exit_status)),
++                    Err(_) => return Err(waitid_err),
++                }
++            }
++            Err(e) => return Err(e),
++            Ok(_) => {}
++        }
++        if unsafe { siginfo.si_pid() } == 0 {
++            Ok(None)
++        } else {
++            Ok(Some(ExitStatus::from_waitid_siginfo(siginfo)))
++        }
++    }
++
++    fn pidfd_send_signal(&self, signal: i32, flags: u32) -> io::Result<()> {
++        cvt(rsys::pidfd_send_signal(self.0.as_raw_fd(), signal, flags)).map(drop)
++    }
++
++    pub fn send_signal(&self, signal: i32) -> io::Result<()> {
++        self.pidfd_send_signal(signal, 0)
++    }
++
++    pub fn send_process_group_signal(&self, signal: i32) -> io::Result<()> {
++        // since kernel 6.9
++        self.pidfd_send_signal(signal, PIDFD_SIGNAL_PROCESS_GROUP)
++    }
++
++    pub fn wait(&self) -> io::Result<ExitStatus> {
++        let r = self.waitid(libc::WEXITED)?;
++        match r {
++            Some(exit_status) => Ok(exit_status),
++            None => unreachable!("waitid with WEXITED should not return None"),
++        }
++    }
++
++    pub fn try_wait(&self) -> io::Result<Option<ExitStatus>> {
++        self.waitid(libc::WEXITED | libc::WNOHANG)
++    }
++}
++
++impl AsInner<FileDesc> for PidFd {
++    fn as_inner(&self) -> &FileDesc {
++        &self.0
++    }
++}
++
++impl IntoInner<FileDesc> for PidFd {
++    fn into_inner(self) -> FileDesc {
++        self.0
++    }
++}
++
++impl FromInner<FileDesc> for PidFd {
++    fn from_inner(inner: FileDesc) -> Self {
++        Self(inner)
++    }
++}
++
++impl FromRawFd for PidFd {
++    unsafe fn from_raw_fd(fd: RawFd) -> Self {
++        Self(unsafe { FileDesc::from_raw_fd(fd) })
++    }
++}
++
++impl IntoRawFd for PidFd {
++    fn into_raw_fd(self) -> RawFd {
++        self.0.into_raw_fd()
++    }
++}
++
++////////////////////////////////////////////////////////////////////////////////
++// ExitStatus
++////////////////////////////////////////////////////////////////////////////////
++
++/// Unix exit statuses
++//
++// This is not actually an "exit status" in Unix terminology.  Rather, it is a "wait status".
++// See the discussion in comments and doc comments for `std::process::ExitStatus`.
++#[derive(PartialEq, Eq, Clone, Copy, Default)]
++pub struct ExitStatus(c_int);
++
++impl fmt::Debug for ExitStatus {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_tuple("unix_wait_status").field(&self.0).finish()
++    }
++}
++
++impl ExitStatus {
++    pub fn new(status: c_int) -> ExitStatus {
++        ExitStatus(status)
++    }
++
++    pub fn from_waitid_siginfo(siginfo: libc::siginfo_t) -> ExitStatus {
++        let status = unsafe { siginfo.si_status() };
++
++        match siginfo.si_code {
++            libc::CLD_EXITED => ExitStatus((status & 0xff) << 8),
++            libc::CLD_KILLED => ExitStatus(status),
++            libc::CLD_DUMPED => ExitStatus(status | 0x80),
++            libc::CLD_CONTINUED => ExitStatus(0xffff),
++            libc::CLD_STOPPED | libc::CLD_TRAPPED => ExitStatus(((status & 0xff) << 8) | 0x7f),
++            _ => unreachable!("waitid() should only return the above codes"),
++        }
++    }
++
++    fn exited(&self) -> bool {
++        libc::WIFEXITED(self.0)
++    }
++
++    pub fn exit_ok(&self) -> Result<(), ExitStatusError> {
++        // This assumes that WIFEXITED(status) && WEXITSTATUS==0 corresponds to status==0, as
++        // unix.rs does.
++        match NonZero::try_from(self.0) {
++            /* was nonzero */ Ok(failure) => Err(ExitStatusError(failure)),
++            /* was zero, couldn't convert */ Err(_) => Ok(()),
++        }
++    }
++
++    pub fn code(&self) -> Option<i32> {
++        self.exited().then(|| libc::WEXITSTATUS(self.0))
++    }
++
++    pub fn signal(&self) -> Option<i32> {
++        libc::WIFSIGNALED(self.0).then(|| libc::WTERMSIG(self.0))
++    }
++
++    pub fn core_dumped(&self) -> bool {
++        libc::WIFSIGNALED(self.0) && libc::WCOREDUMP(self.0)
++    }
++
++    pub fn stopped_signal(&self) -> Option<i32> {
++        libc::WIFSTOPPED(self.0).then(|| libc::WSTOPSIG(self.0))
++    }
++
++    pub fn continued(&self) -> bool {
++        libc::WIFCONTINUED(self.0)
++    }
++
++    pub fn into_raw(&self) -> c_int {
++        self.0
++    }
++}
++
++/// Converts a raw `c_int` to a type-safe `ExitStatus` by wrapping it without copying.
++impl From<c_int> for ExitStatus {
++    fn from(a: c_int) -> ExitStatus {
++        ExitStatus(a)
++    }
++}
++
++impl fmt::Display for ExitStatus {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        if let Some(code) = self.code() {
++            write!(f, "exit status: {code}")
++        } else if let Some(signal) = self.signal() {
++            if self.core_dumped() {
++                write!(f, "signal: {signal} (core dumped)")
++            } else {
++                write!(f, "signal: {signal}")
++            }
++        } else if let Some(signal) = self.stopped_signal() {
++            write!(f, "stopped (not terminated) by signal: {signal}")
++        } else if self.continued() {
++            write!(f, "continued (WIFCONTINUED)")
++        } else {
++            write!(f, "unrecognised wait status: {} {:#x}", self.0, self.0)
++        }
++    }
++}
++
++#[derive(PartialEq, Eq, Clone, Copy)]
++pub struct ExitStatusError(NonZero<c_int>);
++
++impl Into<ExitStatus> for ExitStatusError {
++    fn into(self) -> ExitStatus {
++        ExitStatus(self.0.into())
++    }
++}
++
++impl fmt::Debug for ExitStatusError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_tuple("unix_wait_status").field(&self.0).finish()
++    }
++}
++
++impl ExitStatusError {
++    pub fn code(self) -> Option<NonZero<i32>> {
++        ExitStatus(self.0.into()).code().map(|st| st.try_into().unwrap())
++    }
++}
++
++mod linux_child_ext {
++    use crate::io::ErrorKind;
++    use crate::os::linux::process as os;
++    use crate::sys::{FromInner, process as imp};
++    use crate::{io, mem};
++
++    #[unstable(feature = "linux_pidfd", issue = "82971")]
++    impl crate::os::linux::process::ChildExt for crate::process::Child {
++        fn pidfd(&self) -> io::Result<&os::PidFd> {
++            self.handle
++                .pidfd
++                .as_ref()
++                // SAFETY: The os type is a transparent wrapper, therefore we can transmute references
++                .map(|fd| unsafe { mem::transmute::<&imp::PidFd, &os::PidFd>(fd) })
++                .ok_or_else(|| io::const_error!(ErrorKind::Uncategorized, "no pidfd was created."))
++        }
++
++        fn into_pidfd(mut self) -> Result<os::PidFd, Self> {
++            self.handle
++                .pidfd
++                .take()
++                .map(<os::PidFd as FromInner<imp::PidFd>>::from_inner)
++                .ok_or_else(|| self)
++        }
++    }
++}
++
++#[cfg(test)]
++#[path = "unix/tests.rs"]
++mod tests;
+diff --git a/library/std/src/sys/process/unix/mod.rs b/library/std/src/sys/process/unix/mod.rs
+index f561637..f1a934b 100644
+--- a/library/std/src/sys/process/unix/mod.rs
++++ b/library/std/src/sys/process/unix/mod.rs
+@@ -24,17 +24,23 @@ cfg_select! {
+         use unsupported as imp;
+         pub use unsupported::output;
+     }
++    linux_none => {
++        mod linux_none;
++        use linux_none as imp;
++    }
+     _ => {
+         mod unix;
+         use unix as imp;
+     }
+ }
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(all(target_os = "linux", not(linux_none)))]
+ mod pidfd;
+ 
+ pub use imp::{ExitStatus, ExitStatusError, Process};
+-#[cfg(target_os = "linux")]
++#[cfg(linux_none)]
++pub use linux_none::PidFd;
++#[cfg(all(target_os = "linux", not(linux_none)))]
+ pub use pidfd::PidFd;
+ 
+ pub use self::common::{
+diff --git a/library/std/src/sys/random/linux_none.rs b/library/std/src/sys/random/linux_none.rs
+new file mode 100644
+index 0000000..7f1d547
+--- /dev/null
++++ b/library/std/src/sys/random/linux_none.rs
+@@ -0,0 +1,34 @@
++//! `getrandom(2)`. Keys for `HashMap` don't need to wait for the entropy
++//! pool (`GRND_INSECURE`, falling back to a non-blocking read on kernels
++//! before 5.6).
++
++use linux_none_rt::sys;
++
++const GRND_NONBLOCK: u32 = 1;
++const GRND_INSECURE: u32 = 4;
++
++fn getrandom(mut bytes: &mut [u8], insecure: bool) {
++    let mut flags = if insecure { GRND_INSECURE } else { 0 };
++    while !bytes.is_empty() {
++        match unsafe { sys::getrandom(bytes.as_mut_ptr(), bytes.len(), flags) } {
++            Ok(n) => bytes = &mut bytes[n..],
++            Err(sys::EINTR) => {}
++            Err(sys::EINVAL) if flags == GRND_INSECURE => flags = GRND_NONBLOCK,
++            // not enough entropy yet: the keys need not be secret
++            Err(sys::EAGAIN) if flags == GRND_NONBLOCK => flags = 0,
++            Err(e) => panic!("getrandom failed: {}", sys::strerror(e)),
++        }
++    }
++}
++
++pub fn fill_bytes(bytes: &mut [u8]) {
++    getrandom(bytes, false);
++}
++
++pub fn hashmap_random_keys() -> (u64, u64) {
++    let mut bytes = [0; 16];
++    getrandom(&mut bytes, true);
++    let k1 = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
++    let k2 = u64::from_ne_bytes(bytes[8..].try_into().unwrap());
++    (k1, k2)
++}
+diff --git a/library/std/src/sys/random/mod.rs b/library/std/src/sys/random/mod.rs
+index bc3dd50..ce07af1 100644
+--- a/library/std/src/sys/random/mod.rs
++++ b/library/std/src/sys/random/mod.rs
+@@ -1,5 +1,9 @@
+ cfg_select! {
+     // Tier 1
++    linux_none => {
++        mod linux_none;
++        pub use linux_none::{fill_bytes, hashmap_random_keys};
++    }
+     any(target_os = "linux", target_os = "android") => {
+         mod linux;
+         pub use linux::{fill_bytes, hashmap_random_keys};
+diff --git a/library/std/src/sys/sync/futex/mod.rs b/library/std/src/sys/sync/futex/mod.rs
+index 0edb46c..53ad4b7 100644
+--- a/library/std/src/sys/sync/futex/mod.rs
++++ b/library/std/src/sys/sync/futex/mod.rs
+@@ -1,4 +1,7 @@
+ cfg_select! {
++    linux_none => {
++        pub use crate::sys::pal::futex::*;
++    }
+     any(
+         target_os = "linux",
+         target_os = "android",
+diff --git a/library/std/src/sys/thread/linux_none.rs b/library/std/src/sys/thread/linux_none.rs
+new file mode 100644
+index 0000000..52935a0
+--- /dev/null
++++ b/library/std/src/sys/thread/linux_none.rs
+@@ -0,0 +1,111 @@
++//! Threads on linux-none: `linux_none_rt::thread` (clone, a guard page, TLS
++//! from the executable's `PT_TLS`). As on hermit, std is the only runtime, so
++//! a thread runs its TLS destructors itself once its main function returns.
++
++use linux_none_rt::sys;
++
++use crate::ffi::CStr;
++use crate::num::NonZero;
++use crate::thread::ThreadInit;
++use crate::time::Duration;
++use crate::{cmp, io};
++
++pub const DEFAULT_MIN_STACK_SIZE: usize = 2 * 1024 * 1024;
++
++pub struct Thread {
++    native: Option<linux_none_rt::thread::Thread>,
++}
++
++unsafe impl Send for Thread {}
++unsafe impl Sync for Thread {}
++
++impl Thread {
++    // unsafe: see thread::Builder::spawn_unchecked for safety requirements
++    pub unsafe fn new(stack: usize, init: Box<ThreadInit>) -> io::Result<Thread> {
++        let data = Box::into_raw(init);
++        return match unsafe { linux_none_rt::thread::spawn(stack, thread_start, data.cast()) } {
++            Ok(native) => Ok(Thread { native: Some(native) }),
++            Err(e) => {
++                // The thread failed to start and as a result `data` was not consumed.
++                // Therefore, it is safe to reconstruct the box so that it gets deallocated.
++                drop(unsafe { Box::from_raw(data) });
++                Err(io::Error::from_raw_os_error(e))
++            }
++        };
++
++        unsafe fn thread_start(data: *mut u8) {
++            // SAFETY: we are simply recreating the box that was leaked earlier.
++            let init = unsafe { Box::from_raw(data as *mut ThreadInit) };
++            let rust_start = init.init();
++            rust_start();
++            crate::sys::pal::run_thread_exit();
++        }
++    }
++
++    pub fn join(mut self) {
++        self.native.take().unwrap().join();
++    }
++}
++
++impl Drop for Thread {
++    fn drop(&mut self) {
++        if let Some(native) = self.native.take() {
++            native.detach();
++        }
++    }
++}
++
++pub fn available_parallelism() -> io::Result<NonZero<usize>> {
++    // the affinity mask, up to 8192 CPUs
++    let mut set = [0u64; 128];
++    let n = crate::sys::cvt(unsafe { sys::sched_getaffinity(set.as_mut_ptr().cast(), size_of_val(&set)) })?;
++    let count: usize = set[..n / 8].iter().map(|w| w.count_ones() as usize).sum();
++    NonZero::new(count).ok_or(io::Error::UNKNOWN_THREAD_COUNT)
++}
++
++pub fn current_os_id() -> Option<u64> {
++    Some(sys::gettid() as u64)
++}
++
++pub fn set_name(name: &CStr) {
++    const PR_SET_NAME: usize = 15;
++    // the kernel truncates the name to 15 bytes
++    let _ = unsafe { sys::prctl(PR_SET_NAME, name.as_ptr() as usize, 0, 0, 0) };
++}
++
++pub fn sleep(dur: Duration) {
++    let mut secs = dur.as_secs();
++    let mut nsecs = dur.subsec_nanos() as i64;
++    while secs > 0 || nsecs > 0 {
++        let chunk = cmp::min(i64::MAX as u64, secs);
++        secs -= chunk;
++        // retries on EINTR with the remaining time
++        let _ = sys::nanosleep(&sys::Timespec { sec: chunk as i64, nsec: nsecs });
++        nsecs = 0;
++    }
++}
++
++pub fn sleep_until(deadline: crate::time::Instant) {
++    let timespec = deadline.into_inner().into_timespec();
++    if timespec.tv_sec < 0 {
++        // a negative CLOCK_MONOTONIC time is in the past
++        return;
++    }
++    let ts = sys::Timespec { sec: timespec.tv_sec, nsec: timespec.tv_nsec.as_inner() as i64 };
++    loop {
++        let r = unsafe {
++            sys::clock_nanosleep(sys::CLOCK_MONOTONIC, sys::TIMER_ABSTIME, &ts, crate::ptr::null_mut())
++        };
++        match r {
++            Err(sys::EINTR) => continue,
++            r => {
++                assert!(r.is_ok(), "timespec is in range, clock_nanosleep should not fail");
++                return;
++            }
++        }
++    }
++}
++
++pub fn yield_now() {
++    sys::sched_yield()
++}
+diff --git a/library/std/src/sys/thread/mod.rs b/library/std/src/sys/thread/mod.rs
+index dfbfc2b..a1be7ec 100644
+--- a/library/std/src/sys/thread/mod.rs
++++ b/library/std/src/sys/thread/mod.rs
+@@ -48,6 +48,10 @@ cfg_select! {
+         mod unsupported;
+         pub use unsupported::{DEFAULT_MIN_STACK_SIZE, Thread, current_os_id, set_name, yield_now};
+     }
++    linux_none => {
++        mod linux_none;
++        pub use linux_none::*;
++    }
+     any(target_family = "unix", target_os = "wasi") => {
+         mod unix;
+         #[cfg(not(any(
+diff --git a/library/std/src/sys/thread_local/mod.rs b/library/std/src/sys/thread_local/mod.rs
+index 809ef5c..ea6bd59 100644
+--- a/library/std/src/sys/thread_local/mod.rs
++++ b/library/std/src/sys/thread_local/mod.rs
+@@ -70,6 +70,11 @@ cfg_select! {
+ ))]
+ pub(crate) mod destructors {
+     cfg_select! {
++        linux_none => {
++            mod list;
++            pub(super) use list::register;
++            pub(crate) use list::run;
++        }
+         any(
+             target_os = "linux",
+             target_os = "android",
+@@ -126,6 +131,11 @@ pub(crate) mod guard {
+                 use crate::rt::thread_cleanup;
+             }
+         }
++        linux_none => {
++            // `std` is the only runtime: a thread runs the destructor list
++            // itself on its way out (see `sys::pal::run_thread_exit`).
++            pub(crate) fn enable() {}
++        }
+         any(target_os = "hermit", target_os = "xous") => {
+             // `std` is the only runtime, so it just calls the destructor functions
+             // itself when the time comes.
+@@ -150,6 +160,7 @@ pub(crate) mod guard {
+ /// with a pointer which we can get and set to store our data.
+ pub(crate) mod key {
+     cfg_select! {
++        linux_none => {}
+         any(
+             all(not(target_vendor = "apple"), not(target_family = "wasm"), target_family = "unix"),
+             all(not(target_thread_local), target_vendor = "apple"),

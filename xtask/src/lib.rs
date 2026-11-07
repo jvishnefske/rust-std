@@ -16,7 +16,9 @@
 //! such as the Nix flake; `$LINUX_NONE_STD_SRC` points the harness at it.
 //!
 //! `cargo xtask libc-fixup DIR` applies the libc fixup to the libc crate in
-//! DIR, for crates outside std that depend on another libc version.
+//! DIR, for crates outside std that depend on another libc version;
+//! `cargo xtask musl-cfg DIR` applies its cfg part to any crate (`nix`,
+//! `socket2`, ...) that picks libc's musl definitions by `target_env`.
 //!
 //! `cargo xtask export-patches` writes the commits on top of `base` back to
 //! `std-patches/`, so the patched tree can be edited in place.
@@ -198,10 +200,11 @@ fn libc_dir(library: &Path) -> io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// libc has no items for linux with an empty `target_env`. std only needs its
-/// types and constants (for `os::unix` and friends), and musl's match the
-/// kernel's, so select musl's definitions for linux-none too.
-pub fn libc_as_musl(dir: &Path) -> io::Result<()> {
+/// Make the `target_env = "musl"` cfgs of the crate in `dir` hold on
+/// linux-none too. For libc (see [`libc_as_musl`]) and for crates that
+/// choose between libc's glibc and musl definitions, such as `nix` and
+/// `socket2`: on linux-none libc has musl's.
+pub fn musl_cfg(dir: &Path) -> io::Result<()> {
     const FROM: &str = "target_env = \"musl\"";
     const TO: &str = "any(target_env = \"musl\", all(target_os = \"linux\", target_env = \"\"))";
     for f in walk(&dir.join("src"))? {
@@ -212,6 +215,14 @@ pub fn libc_as_musl(dir: &Path) -> io::Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// libc has no items for linux with an empty `target_env`. std only needs its
+/// types and constants (for `os::unix` and friends), and musl's match the
+/// kernel's, so select musl's definitions for linux-none too.
+pub fn libc_as_musl(dir: &Path) -> io::Result<()> {
+    musl_cfg(dir)?;
     // ...except for linking: there is no libc to link. The arm goes first in
     // the `cfg_if!` that links libc, whose arm order varies between versions.
     let f = dir.join("src/unix/mod.rs");

@@ -102,6 +102,30 @@ fn apps() -> PathBuf {
     repo().join("apps")
 }
 
+/// `cargo` running the toolchain pinned in `rust-toolchain.toml`: through
+/// rustup (`cargo +<pinned>`, since `apps/` selects another toolchain), or
+/// the `cargo` on PATH when that is not a rustup proxy (e.g. under Nix).
+pub(crate) fn pinned_cargo() -> Command {
+    let mut cmd = Command::new("cargo");
+    if cargo_is_rustup_proxy() {
+        cmd.arg(format!("+{}", pinned_toolchain()));
+    }
+    cmd
+}
+
+fn cargo_is_rustup_proxy() -> bool {
+    let Some(path) = std::env::var_os("PATH") else { return false };
+    let Some(cargo) = std::env::split_paths(&path).map(|d| d.join("cargo")).find(|p| p.is_file()) else {
+        return false;
+    };
+    // rustup's proxies are links (hard or symbolic) to rustup itself
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(&cargo), std::fs::metadata(cargo.with_file_name("rustup"))) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
+}
+
 /// The toolchain pinned in `rust-toolchain.toml`.
 fn pinned_toolchain() -> String {
     let s = std::fs::read_to_string(repo().join("rust-toolchain.toml")).unwrap();
@@ -172,9 +196,8 @@ pub fn apps_cargo(arch: Arch, args: &[&str]) -> Command {
 /// target's default), so for unwinding it goes in the rustflags.
 pub fn apps_cargo_with(arch: Arch, panic: Panic, args: &[&str]) -> Command {
     let stamp = prepare();
-    let mut cmd = Command::new("cargo");
-    cmd.arg(format!("+{}", pinned_toolchain()))
-        .args(args)
+    let mut cmd = pinned_cargo();
+    cmd.args(args)
         .current_dir(apps())
         .env("__CARGO_TESTS_ONLY_SRC_ROOT", xtask::library_dir())
         .args(["--target", &arch.target_arg()])

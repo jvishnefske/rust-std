@@ -1,3 +1,4 @@
 target/
 # core dumps (qemu writes them to the working directory)
 *.core
+/result*

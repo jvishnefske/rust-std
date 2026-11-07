@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
-use crate::{Arch, pinned_toolchain, prepare, repo};
+use crate::{Arch, pinned_cargo, prepare, repo};
 
 /// Where both steps build, and where the sysroots go.
 fn target_dir() -> PathBuf {
@@ -48,9 +48,8 @@ fn library_cargo(arch: Arch, args: &[&str]) -> Command {
         "--sysroot",
         sysroot.to_str().unwrap(),
     ];
-    let mut cmd = Command::new("cargo");
-    cmd.arg(format!("+{}", pinned_toolchain()))
-        .args(args)
+    let mut cmd = pinned_cargo();
+    cmd.args(args)
         .current_dir(xtask::library_dir())
         .env_remove("RUSTFLAGS")
         .env("CARGO_ENCODED_RUSTFLAGS", flags.join("\x1f"))

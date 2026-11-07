@@ -11,9 +11,14 @@
 //!   is `std-src`. `-Zbuild-std` reads the std sources from the
 //!   toolchain's sysroot, so this is how cargo finds the patched tree.
 //!
+//! `cargo xtask sysroot --out DIR --no-toolchain` builds a standalone copy of
+//! `std-src` in DIR (rt copied in, no rustup), for builds without rustup
+//! such as the Nix flake; `$LINUX_NONE_STD_SRC` points the harness at it.
+//!
 //! `cargo xtask export-patches` writes the commits on top of `base` back to
 //! `std-patches/`, so the patched tree can be edited in place.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs, io};
@@ -70,7 +75,7 @@ fn patches() -> io::Result<Vec<PathBuf>> {
 /// The patched `library/` directory (`__CARGO_TESTS_ONLY_SRC_ROOT` for
 /// builds that must notice changes to it, see README.md).
 pub fn library_dir() -> PathBuf {
-    out_dir().join("std-src/library")
+    std_src().join("library")
 }
 
 /// A hash of what the patched tree is made from: the pinned sysroot, the
@@ -91,7 +96,12 @@ pub fn inputs_hash() -> io::Result<String> {
 }
 
 fn stamp() -> PathBuf {
-    out_dir().join("std-src/.inputs-hash")
+    std_src().join(".inputs-hash")
+}
+
+/// The patched tree: `$LINUX_NONE_STD_SRC`, else `target/linux-none/std-src`.
+pub fn std_src() -> PathBuf {
+    env::var_os("LINUX_NONE_STD_SRC").map(PathBuf::from).unwrap_or_else(|| out_dir().join("std-src"))
 }
 
 /// Build the patched tree unless it is already built from the current
@@ -101,18 +111,29 @@ pub fn ensure_sysroot() -> io::Result<()> {
     if fs::read_to_string(stamp()).is_ok_and(|s| s == hash) {
         return Ok(());
     }
-    sysroot(false)
+    sysroot(&Options::default())
+}
+
+#[derive(Default)]
+pub struct Options {
+    /// Rebuild the toolchain even if it is up to date.
+    pub force: bool,
+    /// Write a standalone tree here (rt copied, not linked) instead of
+    /// `std_src()`.
+    pub out: Option<PathBuf>,
+    /// Skip the `linux-none` rustup toolchain.
+    pub no_toolchain: bool,
 }
 
 /// Build the patched tree and the `linux-none` toolchain.
-pub fn sysroot(force: bool) -> io::Result<()> {
+pub fn sysroot(opts: &Options) -> io::Result<()> {
     let sysroot = pinned_sysroot()?;
     let library = sysroot.join("lib/rustlib/src/rust/library");
     if !library.join("std/Cargo.toml").exists() {
         return Err(err(format!("{} has no rust-src; run `rustup component add rust-src`", sysroot.display())));
     }
     let out = out_dir();
-    let src = out.join("std-src");
+    let src = opts.out.clone().unwrap_or_else(std_src);
 
     if src.exists() {
         fs::remove_dir_all(&src)?;
@@ -124,7 +145,16 @@ pub fn sysroot(force: bool) -> io::Result<()> {
     copy_tree(&libc, &src.join("libc"), false)?;
     let _ = fs::remove_file(src.join("libc/.cargo-checksum.json"));
     // rt is a member of the library workspace (std-patches adds it)
-    std::os::unix::fs::symlink(repo().join("rt"), src.join("library/linux_none_rt"))?;
+    let rt = src.join("library/linux_none_rt");
+    if opts.out.is_some() {
+        fs::create_dir_all(rt.join("src"))?;
+        copy_tree(&repo().join("rt/src"), &rt.join("src"), false)?;
+        for f in ["Cargo.toml", "build.rs"] {
+            fs::copy(repo().join("rt").join(f), rt.join(f))?;
+        }
+    } else {
+        std::os::unix::fs::symlink(repo().join("rt"), &rt)?;
+    }
     fs::write(src.join(".gitignore"), "/library/linux_none_rt\n/.inputs-hash\n")?;
 
     run(git(&src).args(["init", "-q"]))?;
@@ -139,8 +169,12 @@ pub fn sysroot(force: bool) -> io::Result<()> {
         run(git(&src).args(["am", "-q", "--keep-cr"]).arg(&p))?;
     }
 
-    fs::write(stamp(), inputs_hash()?)?;
-    toolchain(&sysroot, &out, force)?;
+    fs::write(src.join(".inputs-hash"), inputs_hash()?)?;
+    if opts.no_toolchain {
+        eprintln!("xtask: patched tree is ready in {}", src.display());
+        return Ok(());
+    }
+    toolchain(&sysroot, &out, &src, opts.force)?;
     eprintln!("xtask: toolchain `{TOOLCHAIN}` is ready; build with `cargo +{TOOLCHAIN} build --target x86_64-unknown-linux-none`");
     Ok(())
 }
@@ -201,7 +235,7 @@ fn libc_as_musl(dir: &Path) -> io::Result<()> {
 
 /// Hard-link the pinned toolchain into `out/toolchain`, with `rust-src`
 /// pointing at the patched library, and register it with rustup.
-fn toolchain(sysroot: &Path, out: &Path, force: bool) -> io::Result<()> {
+fn toolchain(sysroot: &Path, out: &Path, std_src: &Path, force: bool) -> io::Result<()> {
     let tc = out.join("toolchain");
     let stamp = tc.join(".pinned-sysroot");
     let fresh = fs::read_to_string(&stamp).is_ok_and(|s| s == sysroot.to_string_lossy());
@@ -220,19 +254,26 @@ fn toolchain(sysroot: &Path, out: &Path, force: bool) -> io::Result<()> {
         fs::remove_dir_all(&src)?;
     }
     fs::create_dir_all(&src)?;
-    std::os::unix::fs::symlink(out.join("std-src"), src.join("rust"))?;
+    std::os::unix::fs::symlink(std_src, src.join("rust"))?;
+    if Command::new("rustup").arg("--version").output().is_err() {
+        eprintln!("xtask: no rustup; not registering `{TOOLCHAIN}` (use {} as a sysroot)", tc.display());
+        return Ok(());
+    }
     run(Command::new("rustup").args(["toolchain", "link", TOOLCHAIN]).arg(&tc))?;
     Ok(())
 }
 
-/// Copy `from` to `to`, hard-linking regular files when `link` is set.
+/// Copy `from` to `to`, hard-linking regular files (and keeping symlinks)
+/// when `link` is set.
 /// The toolchain's own `rust-src` is skipped when linking.
 fn copy_tree(from: &Path, to: &Path, link: bool) -> io::Result<()> {
     fs::create_dir_all(to)?;
     for e in fs::read_dir(from)? {
         let e = e?;
         let (src, dst) = (e.path(), to.join(e.file_name()));
-        let ty = e.file_type()?;
+        // a copied source tree gets real files, also where the source is a
+        // symlink farm (rust-overlay's toolchains in the Nix store)
+        let ty = if link { e.file_type()? } else { fs::metadata(&src)?.file_type() };
         if link && src.ends_with("lib/rustlib/src") {
             continue;
         }
@@ -244,6 +285,9 @@ fn copy_tree(from: &Path, to: &Path, link: bool) -> io::Result<()> {
             fs::hard_link(&src, &dst).or_else(|_| fs::copy(&src, &dst).map(drop))?;
         } else {
             fs::copy(&src, &dst)?;
+            // a read-only source (the Nix store) stays read-only otherwise
+            let mode = fs::metadata(&dst)?.permissions().mode();
+            fs::set_permissions(&dst, fs::Permissions::from_mode(mode | 0o200))?;
         }
     }
     Ok(())
@@ -264,7 +308,7 @@ fn walk(dir: &Path) -> io::Result<Vec<PathBuf>> {
 
 /// Write the commits on top of `base` in the patched tree to `std-patches/`.
 pub fn export_patches() -> io::Result<()> {
-    let src = out_dir().join("std-src");
+    let src = std_src();
     let dir = repo().join("std-patches");
     for p in patches()? {
         fs::remove_file(p)?;

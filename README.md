@@ -62,15 +62,20 @@ small runtime crate instead of libc.
   checks that every binary has no undefined symbols.
 - **C functions for crates** (`rt/src/clib.rs`): crates that call libc
   functions themselves (through the libc crate, as `nix`, `memmap2`,
-  `ctrlc` or `terminal_size` do) find 125 of them in rt, written on
+  `ctrlc` or `terminal_size` do) find 147 of them in rt, written on
   its syscalls with musl's types: file descriptors, `isatty` and termios,
   `mmap`, `sysconf`, `sched_getaffinity`, `poll` and epoll, sockets,
   signals, semaphores, `getpwuid_r` and friends, `fork`/`execvp`, `stat`
-  and `statvfs`, inotify, mount tables, and a `dl_iterate_phdr` for the
-  executable. libm's functions (`exp`, `pow`, `sin`, ...) come from
+  and `statvfs`, inotify, mount tables, `malloc` and friends, pthread
+  mutexes, `localtime_r` (zone files and POSIX TZ strings), and a
+  `dl_iterate_phdr` for the executable. libm's functions (`exp`, `pow`, `sin`, ...) come from
   compiler-builtins, which a std patch enables for linux-none. It is not a
   whole libc: there is no stdio beyond reading mount tables, no
-  `malloc`, no pthreads and no locale, so C code still needs a C library.
+  pthreads beyond mutexes and no locale. That is enough for some C code
+  in crates (ring's and aws-lc's crypto, zstd), compiled with the
+  host's C compiler and its headers, without stack protection or
+  `_FORTIFY_SOURCE` (whose `__stack_chk_fail` and `__*_chk` rt lacks);
+  not for most.
   `getenv` sees the initial environment and `putenv`'s additions, not
   `env::set_var`'s. A crate's own copy of libc needs the same patch as
   std's (`cargo xtask libc-fixup DIR`), and crates that choose between

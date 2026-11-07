@@ -33,8 +33,20 @@ const SKIP_LINUX_NONE: &[(&str, &str)] = &[];
 /// started by the harness (see [`run_each`]) rather than by libtest.
 const SKIP_QEMU_NO_BINFMT: &[(&str, &str)] = &[];
 
-fn skipped() -> impl Iterator<Item = &'static str> {
-    SKIP_PANIC_ABORT.iter().chain(SKIP_LINUX_NONE).map(|(name, _)| *name)
+/// Tests that fail under qemu-user 11 (seen with 11.1.2; 10.2 is fine): it
+/// mistranslates SO_RCVTIMEO/SO_SNDTIMEO, so a timeout set on a socket reads
+/// back as another value. The same aarch64 binary passes under qemu 10.2.
+const SKIP_QEMU_11: &[(&str, &str)] = &[
+    ("net::tcp::tests::timeouts", "SO_RCVTIMEO reads back wrong under qemu 11"),
+    ("net::udp::tests::timeouts", "SO_RCVTIMEO reads back wrong under qemu 11"),
+    ("os::unix::net::tests::timeouts", "SO_RCVTIMEO reads back wrong under qemu 11"),
+];
+
+/// The tests to skip when running under `runner` (qemu, or none).
+fn skipped(runner: Option<&Path>) -> Vec<&'static str> {
+    let qemu_11 = runner.and_then(qemu_major).is_some_and(|v| v >= 11);
+    let qemu_skips = if qemu_11 { SKIP_QEMU_11 } else { &[] };
+    SKIP_PANIC_ABORT.iter().chain(SKIP_LINUX_NONE).chain(qemu_skips).map(|(name, _)| *name).collect()
 }
 
 /// `sh -c 'ulimit -c 0; exec ...'`: no core files from aborting tests (qemu
@@ -66,7 +78,8 @@ fn list(runner: Option<&Path>, bin: &Path, ignored: bool) -> Vec<String> {
 /// without binfmt_misc, where libtest could not start the children itself.
 fn run_each(arch: Arch, qemu: &Path, bin: &Path) {
     let ignored = list(Some(qemu), bin, true);
-    let skip: Vec<&str> = skipped().chain(SKIP_QEMU_NO_BINFMT.iter().map(|(n, _)| *n)).collect();
+    let mut skip = skipped(Some(qemu));
+    skip.extend(SKIP_QEMU_NO_BINFMT.iter().map(|(n, _)| *n));
     let todo: Vec<String> =
         list(Some(qemu), bin, false).into_iter().filter(|t| !ignored.contains(t) && !skip.contains(&t.as_str())).collect();
     let next = Mutex::new(todo.iter());
@@ -111,7 +124,7 @@ fn run_each(arch: Arch, qemu: &Path, bin: &Path) {
 fn run_libtest(arch: Arch, runner: Option<&Path>, bin: &Path) {
     let mut cmd = no_core(runner, bin);
     cmd.arg("--exact");
-    for s in skipped() {
+    for s in skipped(runner) {
         cmd.args(["--skip", s]);
     }
     let out = cmd.output().unwrap();

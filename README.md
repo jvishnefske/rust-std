@@ -180,8 +180,9 @@ patched sources if needed, then for x86_64 and for aarch64:
   `-Zpanic-abort-tests`. One test is skipped: it fails the same way with
   std on linux-gnu built like this (`harness/tests/std_unittests.rs` lists
   it with its reason, apart from linux-none gaps, of which there are
-  none). These builds add a few minutes; `SKIP_STD_UNITTESTS=1` leaves
-  them out.
+  none). Under qemu 11, which mistranslates `SO_RCVTIMEO`, the three
+  socket `timeouts` tests are skipped too (they pass under qemu 10). These
+  builds add a few minutes; `SKIP_STD_UNITTESTS=1` leaves them out.
 - **DNS**: `tests/dns.rs` runs `rt`'s resolver on the host against a fake
   server on 127.0.0.1 (CNAME chains, TCP fallback, forged replies,
   timeouts, search domains). The `resolve` example checks lookups through

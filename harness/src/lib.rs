@@ -248,6 +248,13 @@ pub fn fuzzee_bin(arch: Arch) -> PathBuf {
     build(arch, Panic::Abort, &["-p", "fuzzee"]).join("fuzzee")
 }
 
+/// The major version of the qemu at `qemu` ("qemu-aarch64 version 11.1.2").
+pub fn qemu_major(qemu: &Path) -> Option<u32> {
+    let out = Command::new(qemu).arg("--version").output().ok()?;
+    let out = String::from_utf8_lossy(&out.stdout);
+    out.split_once(" version ")?.1.split('.').next()?.parse().ok()
+}
+
 /// A qemu user-mode emulator for aarch64: `$QEMU_AARCH64`, or `qemu-aarch64`
 /// on PATH.
 pub fn qemu_aarch64() -> Option<PathBuf> {

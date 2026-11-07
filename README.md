@@ -125,7 +125,11 @@ that its builds are rebuilt.
 - **Name lookup** reads `/etc/hosts`, then asks the DNS servers in
   `/etc/resolv.conf` (A and AAAA, TCP for truncated answers): there is no
   NSS, so no mDNS, `systemd-resolved` varlink or LDAP. Of `options`, only
-  `timeout`, `attempts` and `ndots` count; IPv4 addresses come first.
+  `timeout`, `attempts` and `ndots` count, and `LOCALDOMAIN` and
+  `RES_OPTIONS` are ignored. There is no EDNS0 (UDP answers stop at 512
+  bytes), a CNAME whose target is not in the answer is not followed up,
+  nameserver scopes must be numeric (`fe80::1%2`), and IPv4 addresses come
+  first rather than in RFC 6724 order.
 - **`env::home_dir`** without `$HOME` reads `/etc/passwd` only (no NSS).
 - **`os::unix::thread::JoinHandleExt`** hands out the address of the
   runtime's control block for the thread as its `pthread_t` (there are no

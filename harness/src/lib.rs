@@ -11,6 +11,7 @@
 //! `apps/` is set up, and `panic=unwind` (in `apps/target/unwind`).
 
 pub mod fuzz;
+pub mod unittests;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

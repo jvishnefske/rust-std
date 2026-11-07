@@ -1,0 +1,239 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: John Vishnefske <jvishnefske@gmail.com>
+Date: Fri, 6 Nov 2026 18:27:26 -0600
+Subject: [PATCH] std: run std's unit tests on linux-none
+
+Make the in-crate unit tests (library/std/src/**/tests.rs) build and
+link without libc on linux-none, and run the ones that were left out:
+
+- process/unix/common/tests.rs calls kill, getpgid, pthread_sigmask,
+  sigemptyset and sigaddset from libc: give it a small libc module of
+  its own on rt's syscalls, with libc's conventions.
+- net/tests.rs (ZeroedMmap) and os/unix/net/tests.rs (close, getpid,
+  getuid, getgid) call rt directly on linux-none.
+- The pidfd tests run against linux-none's PidFd (which also uses its
+  current_process and pid, otherwise dead in a test build).
+- test_named_thread_truncation reads the thread's name back with
+  prctl(PR_GET_NAME), there being no pthread_getname_np.
+---
+ library/std/src/net/tests.rs                  | 11 ++++
+ library/std/src/os/unix/net/tests.rs          | 17 ++++++
+ .../std/src/sys/process/unix/common/tests.rs  | 61 +++++++++++++++++++
+ .../std/src/sys/process/unix/linux_none.rs    |  4 ++
+ .../std/src/sys/process/unix/pidfd/tests.rs   |  5 ++
+ library/std/src/thread/tests.rs               |  7 +++
+ 6 files changed, 105 insertions(+)
+
+diff --git a/library/std/src/net/tests.rs b/library/std/src/net/tests.rs
+index 213c9a5..dc8d7c1 100644
+--- a/library/std/src/net/tests.rs
++++ b/library/std/src/net/tests.rs
+@@ -52,6 +52,14 @@ pub struct ZeroedMmap {
+ #[cfg(all(target_pointer_width = "64", unix))]
+ impl ZeroedMmap {
+     pub fn new(len: usize) -> ZeroedMmap {
++        #[cfg(linux_none)]
++        let ptr = {
++            use linux_none_rt::sys;
++            let flags = sys::MAP_PRIVATE | sys::MAP_ANONYMOUS;
++            let r = unsafe { sys::mmap(0, len, sys::PROT_READ, flags, -1, 0) };
++            crate::ptr::with_exposed_provenance_mut(r.unwrap_or(usize::MAX))
++        };
++        #[cfg(not(linux_none))]
+         let ptr = unsafe {
+             libc::mmap(
+                 crate::ptr::null_mut(),
+@@ -81,6 +89,9 @@ impl crate::ops::Deref for ZeroedMmap {
+ impl Drop for ZeroedMmap {
+     fn drop(&mut self) {
+         // SAFETY: `ptr`/`len` come from the `mmap` call above and are unmapped once.
++        #[cfg(linux_none)]
++        let _ = unsafe { linux_none_rt::sys::munmap(self.ptr.expose_provenance(), self.len) };
++        #[cfg(not(linux_none))]
+         unsafe {
+             libc::munmap(self.ptr, self.len);
+         }
+diff --git a/library/std/src/os/unix/net/tests.rs b/library/std/src/os/unix/net/tests.rs
+index 9c3119e..b18a946 100644
+--- a/library/std/src/os/unix/net/tests.rs
++++ b/library/std/src/os/unix/net/tests.rs
+@@ -726,6 +726,9 @@ fn test_send_vectored_fds_unix_stream() {
+     if let AncillaryData::ScmRights(scm_rights) = ancillary_data_vec.pop().unwrap().unwrap() {
+         let fd_vec = Vec::from_iter(scm_rights);
+         assert_eq!(fd_vec.len(), 1);
++        #[cfg(linux_none)]
++        let _ = linux_none_rt::sys::close(fd_vec[0]);
++        #[cfg(not(linux_none))]
+         unsafe {
+             libc::close(fd_vec[0]);
+         }
+@@ -739,18 +742,29 @@ fn test_send_vectored_fds_unix_stream() {
+ #[cfg_attr(target_os = "android", ignore)] // Android SELinux rules prevent creating Unix sockets
+ #[cfg_attr(target_os = "cygwin", ignore)] // Cygwin recvmsg doesn't support Unix sockets
+ fn test_send_vectored_with_ancillary_to_unix_datagram() {
++    #[cfg(not(linux_none))]
+     fn getpid() -> libc::pid_t {
+         unsafe { libc::getpid() }
+     }
+ 
++    #[cfg(not(linux_none))]
+     fn getuid() -> libc::uid_t {
+         unsafe { libc::getuid() }
+     }
+ 
++    #[cfg(not(linux_none))]
+     fn getgid() -> libc::gid_t {
+         unsafe { libc::getgid() }
+     }
+ 
++    #[cfg(linux_none)]
++    fn getpid() -> libc::pid_t {
++        linux_none_rt::sys::getpid() as libc::pid_t
++    }
++
++    #[cfg(linux_none)]
++    use linux_none_rt::sys::{getgid, getuid};
++
+     let dir = tmpdir();
+     let path1 = dir.path().join("sock1");
+     let path2 = dir.path().join("sock2");
+@@ -842,6 +856,9 @@ fn test_send_vectored_with_ancillary_unix_datagram() {
+     if let AncillaryData::ScmRights(scm_rights) = ancillary_data_vec.pop().unwrap().unwrap() {
+         let fd_vec = Vec::from_iter(scm_rights);
+         assert_eq!(fd_vec.len(), 1);
++        #[cfg(linux_none)]
++        let _ = linux_none_rt::sys::close(fd_vec[0]);
++        #[cfg(not(linux_none))]
+         unsafe {
+             libc::close(fd_vec[0]);
+         }
+diff --git a/library/std/src/sys/process/unix/common/tests.rs b/library/std/src/sys/process/unix/common/tests.rs
+index eacb4d2..220b186 100644
+--- a/library/std/src/sys/process/unix/common/tests.rs
++++ b/library/std/src/sys/process/unix/common/tests.rs
+@@ -1,7 +1,68 @@
+ use super::*;
+ use crate::ffi::OsStr;
++#[cfg(not(linux_none))]
+ use crate::sys::{cvt, cvt_nz};
+ use crate::{mem, ptr};
++#[cfg(linux_none)]
++use self::linux_none::{cvt, cvt_nz, libc, sigaddset, sigemptyset};
++
++/// The libc calls these tests make, on raw syscalls (there is no libc to
++/// link): libc-style return values, -1 with errno set on failure.
++#[cfg(linux_none)]
++mod linux_none {
++    use crate::io;
++
++    pub mod libc {
++        pub use libc::*;
++        use linux_none_rt::sys;
++
++        fn ret(r: sys::SysResult) -> c_int {
++            r.map_or_else(
++                |e| {
++                    crate::sys::io::set_errno(e);
++                    -1
++                },
++                |v| v as c_int,
++            )
++        }
++
++        pub unsafe fn kill(pid: pid_t, sig: c_int) -> c_int {
++            ret(sys::kill(pid, sig as usize))
++        }
++
++        pub unsafe fn getpgid(pid: pid_t) -> pid_t {
++            ret(sys::getpgid(pid))
++        }
++
++        pub unsafe fn pthread_sigmask(
++            how: c_int,
++            set: *const sigset_t,
++            old: *mut sigset_t,
++        ) -> c_int {
++            // returns the error number rather than setting errno
++            unsafe { sys::rt_sigprocmask(how as usize, set.cast(), old.cast()) }.err().unwrap_or(0)
++        }
++    }
++
++    pub unsafe fn sigemptyset(set: *mut libc::sigset_t) -> libc::c_int {
++        unsafe { set.write_bytes(0, 1) };
++        0
++    }
++
++    pub unsafe fn sigaddset(set: *mut libc::sigset_t, sig: libc::c_int) -> libc::c_int {
++        let bit = (sig - 1) as usize;
++        unsafe { *set.cast::<u64>() |= 1 << bit };
++        0
++    }
++
++    pub fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
++        if r == -1 { Err(io::Error::last_os_error()) } else { Ok(r) }
++    }
++
++    pub fn cvt_nz(r: libc::c_int) -> io::Result<()> {
++        if r == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(r)) }
++    }
++}
+ 
+ macro_rules! t {
+     ($e:expr) => {
+diff --git a/library/std/src/sys/process/unix/linux_none.rs b/library/std/src/sys/process/unix/linux_none.rs
+index 8e0e7a7..0514609 100644
+--- a/library/std/src/sys/process/unix/linux_none.rs
++++ b/library/std/src/sys/process/unix/linux_none.rs
+@@ -567,3 +567,7 @@ mod linux_child_ext {
+ #[cfg(test)]
+ #[path = "unix/tests.rs"]
+ mod tests;
++
++#[cfg(test)]
++#[path = "pidfd/tests.rs"]
++mod pidfd_tests;
+diff --git a/library/std/src/sys/process/unix/pidfd/tests.rs b/library/std/src/sys/process/unix/pidfd/tests.rs
+index 4cc2368..b16dc4c 100644
+--- a/library/std/src/sys/process/unix/pidfd/tests.rs
++++ b/library/std/src/sys/process/unix/pidfd/tests.rs
+@@ -20,7 +20,12 @@ fn test_command_pidfd() {
+         assert!(child.pidfd().is_ok());
+     }
+     if let Ok(pidfd) = child.pidfd() {
++        #[cfg(not(linux_none))]
+         let flags = super::cvt(unsafe { libc::fcntl(pidfd.as_raw_fd(), libc::F_GETFD) }).unwrap();
++        #[cfg(linux_none)]
++        let flags =
++            super::cvt(linux_none_rt::sys::fcntl(pidfd.as_raw_fd(), libc::F_GETFD as u32, 0))
++                .unwrap() as libc::c_int;
+         assert!(flags & libc::FD_CLOEXEC != 0);
+     }
+     assert!(child.id() > 0 && child.id() < -1i32 as u32);
+diff --git a/library/std/src/thread/tests.rs b/library/std/src/thread/tests.rs
+index e88ca92..49da9b0 100644
+--- a/library/std/src/thread/tests.rs
++++ b/library/std/src/thread/tests.rs
+@@ -36,6 +36,7 @@ fn test_named_thread() {
+     // Note: musl didn't add pthread_getname_np until 1.2.3
+     all(target_os = "linux", target_env = "gnu"),
+     target_vendor = "apple",
++    linux_none,
+ ))]
+ #[test]
+ fn test_named_thread_truncation() {
+@@ -51,9 +52,15 @@ fn test_named_thread_truncation() {
+ 
+         // But the system is limited -- make sure we successfully set a truncation.
+         let mut buf = vec![0u8; long_name.len() + 1];
++        #[cfg(not(linux_none))]
+         unsafe {
+             libc::pthread_getname_np(libc::pthread_self(), buf.as_mut_ptr().cast(), buf.len());
+         }
++        // PR_GET_NAME: the calling thread's name, at most 16 bytes with the nul
++        #[cfg(linux_none)]
++        let _ = unsafe {
++            linux_none_rt::sys::prctl(16, buf.as_mut_ptr().expose_provenance(), 0, 0, 0)
++        };
+         let cstr = CStr::from_bytes_until_nul(&buf).unwrap();
+         assert!(cstr.to_bytes().len() > 0);
+         assert!(long_name.as_bytes().starts_with(cstr.to_bytes()));

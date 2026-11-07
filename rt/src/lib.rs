@@ -14,12 +14,14 @@
 //! - [`alloc`]: an mmap-backed size-class allocator.
 //! - [`futex`], [`locks`]: futex wait/wake and the locks built on them.
 //! - [`dirent`]: parsing `getdents64` buffers.
+//! - [`errno`]: the thread's `errno`.
 //! - [`vdso`]: finding `clock_gettime` in the kernel's vDSO.
 //!
 //! The crate uses only `core`, so std can depend on it. On other Linux
 //! targets (where libc is the C runtime) it builds without `_start`.
 
 #![no_std]
+#![cfg_attr(linux_none, feature(thread_local))]
 #![allow(clippy::missing_safety_doc, clippy::new_without_default)]
 
 #[cfg(target_arch = "aarch64")]
@@ -37,6 +39,8 @@ compile_error!("linux_none_rt targets Linux only");
 pub mod alloc;
 pub mod dirent;
 pub mod elf;
+#[cfg(linux_none)]
+pub mod errno;
 pub mod futex;
 pub mod locks;
 pub mod process;

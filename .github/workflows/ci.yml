@@ -54,8 +54,9 @@ jobs:
       - name: Clippy
         run: cargo clippy -p linux_none_rt -p xtask -p harness --all-targets -- -D warnings
 
-      # examples, std's own test suite, and differential fuzzing against the
-      # host's std, on both architectures
+      # examples, std's own test suites (library/std/tests and the in-crate
+      # unit tests), and differential fuzzing against the host's std, on
+      # both architectures
       - name: Test
         run: cargo test
 

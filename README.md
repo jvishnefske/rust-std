@@ -31,7 +31,7 @@ small runtime crate instead of libc.
   (variant II on x86_64, variant I on aarch64), threads on `clone` with
   `CLONE_CHILD_CLEARTID` join, process spawning (`clone(CLONE_VM|CLONE_VFORK)`
   + `execve`, or a full fork for `pre_exec` callbacks), an mmap size-class
-  allocator, futexes, `getdents64` parsing, the alternate signal stacks
+  allocator, futexes, errno, `getdents64` parsing, the alternate signal stacks
   and guard-page lookup behind std's stack overflow message, the vDSO's
   `clock_gettime`, and the program headers from `AT_PHDR` (what
   `dl_iterate_phdr` gives a static executable). Kani proofs cover the
@@ -162,6 +162,18 @@ patched sources if needed, then for x86_64 and for aarch64:
   Since that needs no child processes, it also runs under qemu without
   binfmt, minus the two test files that start copies of themselves and
   `rwlock::test_rwlock_max_readers` (2^30 read locks, too slow emulated).
+- **std's unit tests**: it builds std's in-crate tests
+  (`library/std/src/**/tests.rs`) the way `x.py test library/std` does
+  (`harness/src/unittests.rs`): `cargo build -p sysroot` in the patched
+  library workspace makes a sysroot for the target, then `cargo test -p
+  std --lib` builds std as the test crate against it (the sysroot's std
+  provides libtest, the panic handler and the other lang items), with
+  bootstrap's `-Zforce-unstable-if-unmarked`, `panic=abort` and
+  `-Zpanic-abort-tests`. One test is skipped: it fails the same way with
+  std on linux-gnu built like this (`harness/tests/std_unittests.rs` lists
+  it with its reason, apart from linux-none gaps, of which there are
+  none). These builds add a few minutes; `SKIP_STD_UNITTESTS=1` leaves
+  them out.
 - **Differential fuzzing**: `apps/fuzzee/ops.rs` runs both in-process
   against the host's std and in the `fuzzee` binary against linux-none's
   std, and the transcripts must match (`FUZZ_SEED`, `FUZZ_ITERS`,
@@ -171,9 +183,11 @@ aarch64 programs run natively on an aarch64 host, or under qemu when
 `$QEMU_AARCH64` or `qemu-aarch64` on PATH is available. Otherwise they are
 only built and checked statically. std's tests and the smoke example start
 copies of themselves, so under qemu they also need qemu registered with
-binfmt_misc (`qemu-user-static` does that). Without binfmt the tests are
-only built. std's in-crate unit tests
-(`library/std/src/**/tests.rs`) are not run yet.
+binfmt_misc (`qemu-user-static` does that). Without binfmt those are
+only built, except for std's tests under `panic=unwind` (see above) and
+std's unit tests: the harness then starts each unit test under qemu
+itself, as libtest's parent process would (with the test's name in
+`__RUST_TEST_INVOKE`).
 
 The Kani proofs run with `cd rt && cargo kani`.
 

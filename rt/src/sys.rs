@@ -464,6 +464,9 @@ pub unsafe fn setgroups(n: usize, groups: *const u32) -> SysResult {
 pub fn setpgid(pid: i32, pgid: i32) -> SysResult {
     unsafe { sc!(nr::SETPGID, pid as isize, pgid as isize) }
 }
+pub fn getpgid(pid: i32) -> SysResult {
+    unsafe { sc!(nr::GETPGID, pid as isize) }
+}
 pub fn setsid() -> SysResult {
     unsafe { sc!(nr::SETSID) }
 }

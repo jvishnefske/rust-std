@@ -75,6 +75,7 @@ pub mod nr {
     pub const SETGROUPS: usize = 116;
     pub const SETPGID: usize = 109;
     pub const SETSID: usize = 112;
+    pub const GETPGID: usize = 121;
     pub const GETPPID: usize = 110;
     pub const GETGID: usize = 104;
     pub const GETEUID: usize = 107;

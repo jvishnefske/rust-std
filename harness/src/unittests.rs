@@ -38,13 +38,19 @@ fn sysroot(arch: Arch) -> PathBuf {
 
 /// `cargo <args>` in the patched `library/` workspace for `arch`.
 fn library_cargo(arch: Arch, args: &[&str]) -> Command {
-    prepare();
+    let stamp = prepare();
     let sysroot = sysroot(arch);
+    // cargo does not fingerprint the sysroot: the stamp of the sources makes
+    // crates built against an older sysroot std (rand, for std's tests)
+    // rebuild rather than fail to load
+    let src_cfg = format!("--cfg=linux_none_src=\"{stamp}\"");
     let flags = [
         "-Zforce-unstable-if-unmarked",
         "-Ctarget-feature=+crt-static",
         "-Crelocation-model=static",
         "-Clink-arg=-no-pie",
+        &src_cfg,
+        "--check-cfg=cfg(linux_none_src, values(any()))",
         "--sysroot",
         sysroot.to_str().unwrap(),
     ];

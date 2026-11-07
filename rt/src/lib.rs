@@ -18,6 +18,8 @@
 //! - [`errno`]: the thread's `errno`.
 //! - [`vdso`]: finding `clock_gettime` in the kernel's vDSO.
 //! - [`passwd`]: home directories from `/etc/passwd`.
+//! - [`clib`]: the C library functions crates call through the `libc`
+//!   crate (`isatty`, `mmap`, `sysconf`, `sigaction`, `getpwuid_r`, ...).
 //!
 //! The crate uses only `core`, so std can depend on it. On other Linux
 //! targets (where libc is the C runtime) it builds without `_start`.
@@ -39,6 +41,8 @@ compile_error!("linux_none_rt supports x86_64 and aarch64 only");
 compile_error!("linux_none_rt targets Linux only");
 
 pub mod alloc;
+#[cfg(linux_none)]
+pub mod clib;
 pub mod dirent;
 pub mod dns;
 pub mod elf;

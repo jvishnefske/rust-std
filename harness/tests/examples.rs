@@ -27,6 +27,7 @@ const EXAMPLES: &[&str] = &[
     "kcopy",
     "backtrace",
     "unwind",
+    "clib",
 ];
 
 struct Env {
@@ -233,6 +234,68 @@ fn check_process(e: &Env) {
     has(&out, r#"cat: "piped through cat" exit status: 0"#);
     has(&out, "spawn error: NotFound");
     has(&out, "killed: success=false code=None");
+}
+
+/// The /etc/passwd entry of the current user, if it has one.
+fn passwd_entry() -> Option<Vec<String>> {
+    let uid = String::from_utf8(Command::new("id").arg("-u").output().unwrap().stdout).unwrap();
+    std::fs::read_to_string("/etc/passwd")
+        .ok()?
+        .lines()
+        .map(|l| l.split(':').map(String::from).collect::<Vec<_>>())
+        .find(|f| f.len() == 7 && f[2] == uid.trim())
+}
+
+fn check_clib(e: &Env) {
+    let r = e.run("clib", &[], b"", &[("CLIB_TEST", "hello")]);
+    assert_eq!(r.code(), Some(0), "{}", r.stderr());
+    let out = r.stdout();
+    for line in [
+        "isatty 0 errno 25",
+        "sysconf pagesize 4096",
+        "sysconf cpus>0 true",
+        "sysconf bogus -1 errno 22",
+        "syscall getpid true",
+        "getpid true",
+        "mmap 42 munmap 0",
+        "signal handled true",
+        "sem 3 waits",
+        r#"fork exec status 5 out "from-exec\n""#,
+        "poll 1 revents 1",
+        "epoll 1 data 7",
+        "dl_iterate_phdr phnum>0 true",
+        "dl_iterate_phdr objects 1",
+        "getenv hello",
+        "getenv missing true",
+        "putenv put",
+        "fstat 0 size 5",
+        "statvfs 0 bsize>0 true",
+        "getmntent some true root true",
+        "eventfd 5",
+        "tcgetattr -1 errno 25",
+        "socket listen true accepting 1",
+        "math 2.718282 1024 0 0.785398 3",
+    ] {
+        has(&out, line);
+    }
+    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
+    has(&out, &format!("gethostname {}\n", host.trim()));
+    match passwd_entry() {
+        Some(f) => {
+            has(&out, &format!("getpwuid_r {} {} {}\n", f[0], f[2], f[5]));
+            has(&out, &format!("getpwnam uid {}\n", f[2]));
+            has(&out, "getpwuid_r small 34");
+        }
+        None => has(&out, "getpwuid_r none 0"),
+    }
+    let gid = String::from_utf8(Command::new("id").arg("-g").output().unwrap().stdout).unwrap();
+    let group = std::fs::read_to_string("/etc/group")
+        .ok()
+        .and_then(|g| g.lines().map(|l| l.split(':').map(String::from).collect::<Vec<_>>()).find(|f| f.len() == 4 && f[2] == gid.trim()));
+    match group {
+        Some(f) => has(&out, &format!("getgrgid_r {} {}\n", f[0], f[2])),
+        None => has(&out, "getgrgid_r none 0"),
+    }
 }
 
 fn check_net(e: &Env) {
@@ -498,6 +561,7 @@ fn check_all(e: &Env, tag: &str) {
     check_kcopy(e, tag);
     check_backtrace(e);
     check_unwind(e);
+    check_clib(e);
 }
 
 fn check_smoke(e: &Env) {

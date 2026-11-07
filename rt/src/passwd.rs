@@ -16,7 +16,7 @@ fn entry_home(line: &[u8], uid: u32) -> Option<&[u8]> {
 }
 
 /// A decimal uid; None if it is not one or does not fit.
-fn parse_uid(s: &[u8]) -> Option<u32> {
+pub(crate) fn parse_uid(s: &[u8]) -> Option<u32> {
     if s.is_empty() || s.len() > 10 {
         return None;
     }

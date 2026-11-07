@@ -58,8 +58,24 @@ small runtime crate instead of libc.
 - **libc** stays a dependency of std, for the types and constants `os::unix`
   exposes. libc has no definitions for linux with an empty `target_env`, so
   `cargo xtask sysroot` patches std's copy to use musl's (whose layouts are
-  the kernel's) and to link nothing. No libc *function* is ever called: the
-  harness checks that every binary has no undefined symbols.
+  the kernel's) and to link nothing. std calls no libc function: the harness
+  checks that every binary has no undefined symbols.
+- **C functions for crates** (`rt/src/clib.rs`): crates that call libc
+  functions themselves (through the libc crate, as `nix`, `memmap2`,
+  `ctrlc` or `terminal_size` do) find 125 of them in rt, written on
+  its syscalls with musl's types: file descriptors, `isatty` and termios,
+  `mmap`, `sysconf`, `sched_getaffinity`, `poll` and epoll, sockets,
+  signals, semaphores, `getpwuid_r` and friends, `fork`/`execvp`, `stat`
+  and `statvfs`, inotify, mount tables, and a `dl_iterate_phdr` for the
+  executable. libm's functions (`exp`, `pow`, `sin`, ...) come from
+  compiler-builtins, which a std patch enables for linux-none. It is not a
+  whole libc: there is no stdio beyond reading mount tables, no
+  `malloc`, no pthreads and no locale, so C code still needs a C library.
+  `getenv` sees the initial environment and `putenv`'s additions, not
+  `env::set_var`'s. A crate's own copy of libc needs the same patch as
+  std's (`cargo xtask libc-fixup DIR`), and crates that choose between
+  libc's glibc and musl definitions by `target_env` need musl's
+  (`cargo xtask musl-cfg DIR`).
 - **`targets/aarch64-unknown-linux-none.json`**: there is no built-in aarch64
   linux-none target; this is the x86_64 one with aarch64's arch, data layout
   and features.
@@ -164,8 +180,7 @@ patched sources if needed, then for x86_64 and for aarch64:
   `apps/stdtests` crate) under libtest with `-Zpanic-abort-tests`, so every
   test runs in a child process. Skipped are the ten sync tests that need
   catching a panic. They fail the same way with std on linux-gnu under
-  `panic=abort`. `switch-stdout.rs` is left out because it calls libc
-  itself. The tests run again with `panic=unwind` and plain libtest
+  `panic=abort`. The tests run again with `panic=unwind` and plain libtest
   (each test on a thread), where nothing is skipped and those ten pass.
   Since that needs no child processes, it also runs under qemu without
   binfmt, minus the two test files that start copies of themselves and
@@ -229,7 +244,11 @@ $ nix develop                   # the pinned toolchain, qemu, strace; then cargo
     the vendor directory.
 
   Use `apps/.cargo/config.toml`'s settings, and only pure-Rust
-  dependencies: there is no libc for C code to link against.
+  dependencies: there is no libc for C code to link against. Vendored
+  `libc` crates need `xtask libc-fixup`, and crates such as `nix` and
+  `socket2` need `xtask musl-cfg` (`.#xtask` has both). The
+  [linux-none-pkgs](../linux-none-pkgs) flake does all of this for nixpkgs'
+  Rust packages.
 - Checks:
   - `harness` runs the examples and the fuzzer.
   - `stdtests` runs std's test suites, which take a while.

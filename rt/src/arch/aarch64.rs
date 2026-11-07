@@ -107,6 +107,20 @@ pub mod nr {
     pub const MKNODAT: usize = 33;
     pub const RT_SIGRETURN: usize = 139;
     pub const DUP: usize = 23;
+    pub const EPOLL_CREATE1: usize = 20;
+    pub const EPOLL_CTL: usize = 21;
+    pub const EPOLL_PWAIT: usize = 22;
+    pub const SYSINFO: usize = 179;
+    pub const FACCESSAT2: usize = 439;
+    pub const EVENTFD2: usize = 19;
+    pub const INOTIFY_INIT1: usize = 26;
+    pub const INOTIFY_ADD_WATCH: usize = 27;
+    pub const INOTIFY_RM_WATCH: usize = 28;
+    pub const STATFS: usize = 43;
+    pub const RT_SIGTIMEDWAIT: usize = 137;
+    pub const NEWFSTATAT: usize = 79;
+    pub const UMASK: usize = 166;
+    pub const GETRUSAGE: usize = 165;
 }
 
 /// # Safety

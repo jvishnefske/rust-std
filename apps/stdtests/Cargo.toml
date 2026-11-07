@@ -5,8 +5,6 @@ edition = "2024"
 publish = false
 description = "std's own integration tests (library/std/tests of the patched tree), built for linux-none"
 
-# switch-stdout.rs is left out: it calls libc's dup/dup2 itself.
-
 [lib]
 path = "src/lib.rs"
 test = false
@@ -104,6 +102,10 @@ path = "../../target/linux-none/std-src/library/std/tests/volatile-fat-ptr.rs"
 name = "pipe-subprocess"
 path = "../../target/linux-none/std-src/library/std/tests/pipe_subprocess.rs"
 harness = false
+
+[[test]]
+name = "switch-stdout"
+path = "../../target/linux-none/std-src/library/std/tests/switch-stdout.rs"
 
 [[test]]
 name = "sync"

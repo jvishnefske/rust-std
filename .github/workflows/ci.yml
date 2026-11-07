@@ -70,3 +70,14 @@ jobs:
         with:
           kani-version: "0.68.0"
           working-directory: rt
+
+  nix:
+    name: nix flake check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      # builds the examples and runs the static-ELF checks, the harness and
+      # std's tests in the sandbox: no rustup, no network
+      - run: nix flake check -L

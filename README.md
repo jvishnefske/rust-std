@@ -203,10 +203,43 @@ itself, as libtest's parent process would (with the test's name in
 
 The Kani proofs run with `cd rt && cargo kani`.
 
+## Nix
+
+`flake.nix` builds everything without rustup or network access (x86_64-linux
+hosts):
+
+```console
+$ nix build                     # examples for both targets, in result/bin
+$ nix flake check               # static-ELF checks, the harness, std's tests
+$ nix develop                   # the pinned toolchain, qemu, strace; then cargo test
+```
+
+- The toolchain comes from rust-overlay, read from `rust-toolchain.toml`.
+- `.#std-src` is the patched tree that `cargo xtask sysroot --out DIR
+  --no-toolchain` builds, with rt copied in.
+- `.#vendor` holds every crate a build needs. std's come from `rust-src`,
+  which vendors them, and the rest come from `apps/Cargo.lock` and
+  `Cargo.lock`. `.#cargo-config` is a `$CARGO_HOME/config.toml` that builds
+  offline from it.
+- To build your own crate the same way, set:
+  - `__CARGO_TESTS_ONLY_SRC_ROOT=<std-src>/library`
+  - `LINUX_NONE_STD_SRC=<std-src>`
+  - that config in `$CARGO_HOME`, with your own lockfile's crates added to
+    the vendor directory.
+
+  Use `apps/.cargo/config.toml`'s settings, and only pure-Rust
+  dependencies: there is no libc for C code to link against.
+- Checks:
+  - `harness` runs the examples and the fuzzer.
+  - `stdtests` runs std's test suites, which take a while.
+
+  In the sandbox, qemu isn't registered with binfmt and there is no network,
+  so those tests skip themselves as they do elsewhere.
+
 ## Requirements
 
 - rustup, with the nightly pinned in `rust-toolchain.toml` and its
-  `rust-src` (rustup installs both).
+  `rust-src` (rustup installs both). Or Nix, see above.
 - git (`cargo xtask sysroot` applies the patches with `git am`).
 - Network access on first build, for std's crates.io dependencies.
 - Linux 4.11 or later on the target (for `statx`). Newer interfaces

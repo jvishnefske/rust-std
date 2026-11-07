@@ -57,6 +57,7 @@ pub mod start;
 pub mod sys;
 pub mod thread;
 pub mod tls;
+pub mod tz;
 pub mod vdso;
 
 pub use arch::nr;

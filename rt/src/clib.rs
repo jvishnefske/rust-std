@@ -23,7 +23,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::arch::{KSigaction, nr};
 use crate::sys::{self, AT_FDCWD, SysResult};
-use crate::{elf, errno, futex, start};
+use crate::{elf, errno, futex, start, tz};
 
 type size_t = usize;
 type ssize_t = isize;
@@ -1702,4 +1702,140 @@ pub unsafe extern "C" fn strerror_r(e: c_int, buf: *mut c_char, len: size_t) -> 
         *buf.add(n) = 0;
     }
     if n < msg.len() { sys::ERANGE } else { 0 }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getsockname(fd: c_int, addr: *mut c_void, len: *mut u32) -> c_int {
+    ret_int(unsafe { sys::getsockname(fd, addr.cast(), len) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpeername(fd: c_int, addr: *mut c_void, len: *mut u32) -> c_int {
+    ret_int(unsafe { sys::getpeername(fd, addr.cast(), len) })
+}
+
+// ---- broken-down time ----
+
+#[repr(C)]
+pub struct tm {
+    tm_sec: c_int,
+    tm_min: c_int,
+    tm_hour: c_int,
+    tm_mday: c_int,
+    tm_mon: c_int,
+    tm_year: c_int,
+    tm_wday: c_int,
+    tm_yday: c_int,
+    tm_isdst: c_int,
+    tm_gmtoff: c_long,
+    tm_zone: *const c_char,
+}
+
+/// The local time type of `t`, from the zone `$TZ` names, as musl finds
+/// it: a file (under `$TZDIR` too) or a POSIX TZ string; `/etc/localtime`
+/// without `$TZ`; UTC failing both. Read on each call.
+fn local_at(t: i64) -> tz::Local {
+    let from_file = |path: &CStr| with_file(path, |f| tz::tzif(f, t)).ok().flatten();
+    let tz = unsafe { getenv(c"TZ".as_ptr()) };
+    if tz.is_null() {
+        return from_file(c"/etc/localtime").unwrap_or(tz::Local::UTC);
+    }
+    let tz = unsafe { CStr::from_ptr(tz) }.to_bytes();
+    let tz = tz.strip_prefix(b":").unwrap_or(tz);
+    let mut path = [0u8; 256];
+    // the file dir/tz, or tz without a dir
+    let mut file_at = |dir: &[u8]| {
+        let sep = !dir.is_empty() as usize;
+        let n = dir.len() + sep + tz.len();
+        if n >= path.len() {
+            return None;
+        }
+        path[..dir.len()].copy_from_slice(dir);
+        path[dir.len()] = b'/';
+        path[dir.len() + sep..n].copy_from_slice(tz);
+        path[n] = 0;
+        from_file(CStr::from_bytes_until_nul(&path).ok()?)
+    };
+    let found = if tz.starts_with(b"/") {
+        file_at(b"")
+    } else if tz.is_empty() || tz.windows(2).any(|w| w == b"..") {
+        None
+    } else {
+        let tzdir = unsafe { getenv(c"TZDIR".as_ptr()) };
+        let tzdir = (!tzdir.is_null()).then(|| unsafe { CStr::from_ptr(tzdir) }.to_bytes());
+        tzdir
+            .into_iter()
+            .chain([&b"/usr/share/zoneinfo"[..], b"/share/zoneinfo", b"/etc/zoneinfo"])
+            .find_map(&mut file_at)
+    };
+    found.or_else(|| tz::posix(tz, t)).unwrap_or(tz::Local::UTC)
+}
+
+/// The zone abbreviation `tm_zone` points to, until the thread's next call.
+#[thread_local]
+static mut ZONE: [u8; 8] = [0; 8];
+
+unsafe fn fill_tm(t: i64, local: tz::Local, out: *mut tm) -> *mut tm {
+    let secs = t + local.offset as i64;
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    let (y, m, d) = tz::civil_from_days(days);
+    let Ok(year) = c_int::try_from(y - 1900) else {
+        set_errno(sys::EOVERFLOW);
+        return core::ptr::null_mut();
+    };
+    unsafe {
+        ZONE = local.abbr;
+        out.write(tm {
+            tm_sec: (rem % 60) as c_int,
+            tm_min: (rem / 60 % 60) as c_int,
+            tm_hour: (rem / 3600) as c_int,
+            tm_mday: d as c_int,
+            tm_mon: m as c_int - 1,
+            tm_year: year,
+            // 1970-01-01 was a Thursday
+            tm_wday: (days + 4).rem_euclid(7) as c_int,
+            tm_yday: (days - tz::days_from_civil(y, 1, 1)) as c_int,
+            tm_isdst: local.isdst as c_int,
+            tm_gmtoff: local.offset as c_long,
+            tm_zone: (&raw const ZONE).cast(),
+        });
+    }
+    out
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gmtime_r(t: *const i64, out: *mut tm) -> *mut tm {
+    unsafe { fill_tm(*t, tz::Local::UTC, out) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn localtime_r(t: *const i64, out: *mut tm) -> *mut tm {
+    let t = unsafe { *t };
+    unsafe { fill_tm(t, local_at(t), out) }
+}
+
+#[thread_local]
+static mut TM: tm = tm {
+    tm_sec: 0,
+    tm_min: 0,
+    tm_hour: 0,
+    tm_mday: 0,
+    tm_mon: 0,
+    tm_year: 0,
+    tm_wday: 0,
+    tm_yday: 0,
+    tm_isdst: 0,
+    tm_gmtoff: 0,
+    tm_zone: core::ptr::null(),
+};
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gmtime(t: *const i64) -> *mut tm {
+    unsafe { gmtime_r(t, &raw mut TM) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn localtime(t: *const i64) -> *mut tm {
+    unsafe { localtime_r(t, &raw mut TM) }
 }

@@ -48,6 +48,21 @@ struct EpollEvent {
 }
 
 #[repr(C)]
+struct Tm {
+    sec: c_int,
+    min: c_int,
+    hour: c_int,
+    mday: c_int,
+    mon: c_int,
+    year: c_int,
+    wday: c_int,
+    yday: c_int,
+    isdst: c_int,
+    gmtoff: c_long,
+    zone: *const c_char,
+}
+
+#[repr(C)]
 struct PollFd {
     fd: c_int,
     events: i16,
@@ -116,6 +131,10 @@ unsafe extern "C" {
     fn pthread_mutex_unlock(m: *mut [c_int; 10]) -> c_int;
     fn strerror_r(e: c_int, buf: *mut c_char, len: usize) -> c_int;
     fn lseek(fd: c_int, off: i64, whence: c_int) -> i64;
+    fn getsockname(fd: c_int, addr: *mut c_void, len: *mut u32) -> c_int;
+    fn getpeername(fd: c_int, addr: *mut c_void, len: *mut u32) -> c_int;
+    fn gmtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+    fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -288,8 +307,12 @@ fn main() {
         let ok = bind(sock, addr.as_ptr().cast(), 16) == 0 && listen(sock, 1) == 0;
         // SOL_SOCKET, SO_ACCEPTCONN
         getsockopt(sock, 1, 30, (&raw mut accepting).cast(), &mut len);
+        let (mut bound, mut len) = ([0u8; 16], 16u32);
+        let named = getsockname(sock, bound.as_mut_ptr().cast(), &mut len);
+        let port = u16::from_be_bytes([bound[2], bound[3]]);
         close(sock);
         println!("socket listen {ok} accepting {accepting}");
+        println!("getsockname {named} port>0 {} peer {}", port > 0, getpeername(0, bound.as_mut_ptr().cast(), &mut len));
 
         println!("math {:.6} {} {} {:.6} {}", exp(1.0), pow(2.0, 10.0), sin(0.0), atan2(1.0, 1.0), log2(8.0));
 
@@ -325,5 +348,21 @@ fn main() {
             lseek(-1, 0, 0);
             *__errno_location()
         });
+
+        // 2023-11-14 22:13:20 UTC, a Tuesday
+        let t: i64 = 1_700_000_000;
+        let mut tm = std::mem::zeroed::<Tm>();
+        gmtime_r(&t, &mut tm);
+        println!(
+            "gmtime_r {}-{:02}-{:02} {:02}:{:02}:{:02} wday {} yday {} {}",
+            tm.year + 1900, tm.mon + 1, tm.mday, tm.hour, tm.min, tm.sec, tm.wday, tm.yday, cstr(tm.zone)
+        );
+        let local = |tm: &Tm| format!("{:02}:{:02} isdst {} gmtoff {} {}", tm.hour, tm.min, tm.isdst, tm.gmtoff, cstr(tm.zone));
+        putenv(c"TZ=AEST-10AEDT,M10.1.0,M4.1.0/3".as_ptr().cast_mut());
+        localtime_r(&t, &mut tm);
+        println!("localtime_r posix {}", local(&tm));
+        putenv(c"TZ=America/Chicago".as_ptr().cast_mut());
+        localtime_r(&t, &mut tm);
+        println!("localtime_r file {}", local(&tm));
     }
 }

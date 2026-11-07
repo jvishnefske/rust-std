@@ -56,6 +56,7 @@ pub const ENAMETOOLONG: i32 = 36;
 pub const ENOSYS: i32 = 38;
 pub const ENOTEMPTY: i32 = 39;
 pub const ELOOP: i32 = 40;
+pub const EOVERFLOW: i32 = 75;
 pub const EADDRINUSE: i32 = 98;
 pub const EADDRNOTAVAIL: i32 = 99;
 pub const ENETDOWN: i32 = 100;
@@ -663,6 +664,7 @@ pub const fn strerror(e: i32) -> &'static str {
         ENOSYS => "Function not implemented",
         ENOTEMPTY => "Directory not empty",
         ELOOP => "Too many levels of symbolic links",
+        EOVERFLOW => "Value too large for defined data type",
         88 => "Socket operation on non-socket",
         95 => "Operation not supported",
         97 => "Address family not supported by protocol",

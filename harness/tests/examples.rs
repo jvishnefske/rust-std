@@ -279,9 +279,17 @@ fn check_clib(e: &Env) {
         "pthread_mutex 0 16 0 0",
         "strerror_r 0 No such file or directory short 34 No ",
         "lseek 1 5 errno 9",
+        "getsockname 0 port>0 true peer -1",
+        "gmtime_r 2023-11-14 22:13:20 wday 2 yday 317 UTC",
+        "localtime_r posix 09:13 isdst 1 gmtoff 39600 AEDT",
     ] {
         has(&out, line);
     }
+    // the zone file, where the system has one (not in Nix's build sandbox)
+    let chicago = ["/usr/share/zoneinfo", "/share/zoneinfo", "/etc/zoneinfo"]
+        .iter()
+        .any(|d| std::path::Path::new(d).join("America/Chicago").exists());
+    has(&out, if chicago { "localtime_r file 16:13 isdst 0 gmtoff -21600 CST" } else { "localtime_r file 22:13 isdst 0 gmtoff 0 UTC" });
     let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
     has(&out, &format!("gethostname {}\n", host.trim()));
     match passwd_entry() {

@@ -32,10 +32,12 @@ small runtime crate instead of libc.
   `CLONE_CHILD_CLEARTID` join, process spawning (`clone(CLONE_VM|CLONE_VFORK)`
   + `execve`, or a full fork for `pre_exec` callbacks), an mmap size-class
   allocator, futexes, `getdents64` parsing, the alternate signal stacks
-  and guard-page lookup behind std's stack overflow message, and the
-  vDSO's `clock_gettime`. Kani proofs cover the allocator's size classes,
-  the TLS layout, syscall error decoding, the dirent parser, the
-  `/proc/self/maps` parser and the vDSO parser.
+  and guard-page lookup behind std's stack overflow message, the vDSO's
+  `clock_gettime`, and the program headers from `AT_PHDR` (what
+  `dl_iterate_phdr` gives a static executable). Kani proofs cover the
+  allocator's size classes, the TLS layout, syscall error decoding, the
+  dirent parser, the `/proc/self/maps` parser, the vDSO parser and the
+  `PT_GNU_EH_FRAME` lookup.
 - **`std-patches/`**: a patch series against `library/` of the pinned
   nightly's `rust-src`. It adds `cfg(linux_none)` (linux with an empty
   `target_env`), a `linux_none` arm ahead of the `unix` one in each `sys`
@@ -45,6 +47,13 @@ small runtime crate instead of libc.
   layer); fs, fd, thread, process spawning and sockets have their own files.
   `os::unix`, `os::linux` and `os::fd` compile unmodified apart from a few
   import lines.
+- **Unwinding** uses the pure-Rust [`unwinding`] crate (core only, already
+  std's unwinder on Xous) in place of libgcc_s/libunwind. std registers an
+  FDE finder that hands it the executable's `.eh_frame_hdr`, found through
+  `PT_GNU_EH_FRAME`. Backtraces walk the stack with it under either panic
+  strategy and are symbolized by std's backtrace-rs (gimli) from
+  `current_exe`'s debug info, with `mmap` and the library list on rt
+  instead of libc.
 - **libc** stays a dependency of std, for the types and constants `os::unix`
   exposes. libc has no definitions for linux with an empty `target_env`, so
   `cargo xtask sysroot` patches std's copy to use musl's (whose layouts are
@@ -74,8 +83,31 @@ $ cargo test -p stdtests -Zbuild-std=std,panic_abort,test -Zpanic-abort-tests
 ```
 
 For your own crate, copy `apps/.cargo/config.toml` and
-`apps/rust-toolchain.toml` (or use `cargo +linux-none`). Panics abort
-(`panic = "abort"` is required), and tests need `-Zpanic-abort-tests`.
+`apps/rust-toolchain.toml` (or use `cargo +linux-none`). With that
+configuration panics abort, and tests need `-Zpanic-abort-tests`.
+
+### panic=unwind
+
+The targets default to `panic=abort` (the built-in x86_64 spec says so, and
+the aarch64 JSON copies it), but rustc accepts `-Cpanic=unwind` for them.
+Cargo never passes that flag itself, since it assumes unwinding is the
+default, so put it in the rustflags, and build `panic_unwind` with std's
+`panic-unwind` feature:
+
+```console
+$ cd apps    # --config arrays add to .cargo/config.toml's rustflags
+$ cargo build --config 'profile.dev.panic="unwind"' \
+    --config 'target.x86_64-unknown-linux-none.rustflags=["-Cpanic=unwind"]' \
+    -Zbuild-std=std,panic_abort,panic_unwind,test \
+    -Zbuild-std-features=compiler-builtins-mem,backtrace,panic-unwind
+```
+
+`catch_unwind`, panics crossing `JoinHandle::join`, lock poisoning and
+plain libtest (no `-Zpanic-abort-tests`) then work as on linux-gnu.
+`RUST_BACKTRACE=1` prints symbolized frames under both strategies (std's
+`backtrace` feature, on in `apps/.cargo/config.toml`).
+
+[`unwinding`]: https://github.com/nbdd0121/unwinding
 
 Cargo does not notice changes to `-Zbuild-std` sources. After re-running
 `cargo xtask sysroot`, `cargo clean` your project. When editing std or `rt`,
@@ -86,8 +118,9 @@ that its builds are rebuilt.
 
 ## What differs from std on linux-gnu
 
-- **Panics abort**: there is no unwinder. `catch_unwind` cannot catch, and
-  backtraces are empty.
+- **Panics abort by default**: unwinding needs `-Cpanic=unwind` (above).
+  The unwinder only knows the executable's own unwind tables (there are no
+  shared objects), and does not unwind through signal frames.
 - **No DNS**: name lookup knows numeric addresses and `/etc/hosts`.
 - **No passwd database**: `env::home_dir` uses `$HOME` only.
 - **`os::unix::thread::JoinHandleExt`** hands out the address of the
@@ -102,8 +135,12 @@ patched sources if needed, then for x86_64 and for aarch64:
 
 - **Examples**: it builds `apps/examples` and checks what each program
   prints, and that every binary is a static ELF with no `PT_INTERP`,
-  `PT_DYNAMIC` or undefined symbol. That includes overflowing the stack of
-  the main and of a spawned thread (std's message, then SIGABRT), and
+  `PT_DYNAMIC` or undefined symbol; once with `panic=abort` and once with
+  `panic=unwind` (in `apps/target/unwind`). `backtrace` and `unwind`
+  check symbolized backtraces, `catch_unwind`, destructors during
+  unwinding, panics across `join`, poisoning and `resume_unwind`. It
+  also overflows the stack of the main and of a spawned thread (std's
+  message, then SIGABRT), and checks
   `available_parallelism` under a two-core quota from
   `systemd-run --user -p CPUQuota=200%` (skipped without it). On x86_64
   with `strace` installed it also checks that `kcopy`'s `io::copy` calls
@@ -120,7 +157,11 @@ patched sources if needed, then for x86_64 and for aarch64:
   test runs in a child process. Skipped are the ten sync tests that need
   catching a panic. They fail the same way with std on linux-gnu under
   `panic=abort`. `switch-stdout.rs` is left out because it calls libc
-  itself.
+  itself. The tests run again with `panic=unwind` and plain libtest
+  (each test on a thread), where nothing is skipped and those ten pass.
+  Since that needs no child processes, it also runs under qemu without
+  binfmt, minus the two test files that start copies of themselves and
+  `rwlock::test_rwlock_max_readers` (2^30 read locks, too slow emulated).
 - **Differential fuzzing**: `apps/fuzzee/ops.rs` runs both in-process
   against the host's std and in the `fuzzee` binary against linux-none's
   std, and the transcripts must match (`FUZZ_SEED`, `FUZZ_ITERS`,

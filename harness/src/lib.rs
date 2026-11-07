@@ -6,6 +6,9 @@
 //! at the patched `library/` (rather than the `linux-none` toolchain), and
 //! carry a hash of the std and rt sources in their rustflags: cargo does not
 //! notice edits to `-Zbuild-std` crates on its own.
+//!
+//! Everything builds in two configurations ([`Panic`]): `panic=abort`, as
+//! `apps/` is set up, and `panic=unwind` (in `apps/target/unwind`).
 
 pub mod fuzz;
 
@@ -54,6 +57,25 @@ impl Arch {
         match self {
             Arch::Aarch64 => qemu_aarch64().map(Some),
             Arch::X86_64 => None,
+        }
+    }
+}
+
+/// The panic strategy programs and std are built with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Panic {
+    /// `apps/`'s own configuration (`panic = "abort"` in its profiles).
+    Abort,
+    /// `-Cpanic=unwind`, with std's `panic-unwind` feature.
+    Unwind,
+}
+
+impl Panic {
+    /// The cargo target directory, relative to `apps/`.
+    fn target_dir(self) -> &'static str {
+        match self {
+            Panic::Abort => "target",
+            Panic::Unwind => "target/unwind",
         }
     }
 }
@@ -108,7 +130,14 @@ fn sources_stamp() -> String {
     }
     let mut h: u64 = 0xcbf29ce484222325;
     let lib = xtask::library_dir();
-    for p in [lib.join("Cargo.toml"), lib.join("std"), lib.join("../libc/src"), repo().join("rt")] {
+    for p in [
+        lib.join("Cargo.toml"),
+        lib.join("std"),
+        lib.join("unwind"),
+        lib.join("backtrace/src"),
+        lib.join("../libc/src"),
+        repo().join("rt"),
+    ] {
         if p.ends_with("rt") {
             for f in ["Cargo.toml", "build.rs", "src"] {
                 walk(&p.join(f), &mut h);
@@ -131,6 +160,16 @@ fn prepare() -> &'static str {
 
 /// `cargo <args>` in `apps/` for `arch`, building std from the patched tree.
 pub fn apps_cargo(arch: Arch, args: &[&str]) -> Command {
+    apps_cargo_with(arch, Panic::Abort, args)
+}
+
+/// [`apps_cargo`] for the panic strategy `panic`.
+///
+/// The built-in `x86_64-unknown-linux-none` target (and our aarch64 spec,
+/// copied from it) defaults to `panic=abort`. rustc accepts `-Cpanic=unwind`
+/// for it, but cargo never passes that flag (it takes unwind to be every
+/// target's default), so for unwinding it goes in the rustflags.
+pub fn apps_cargo_with(arch: Arch, panic: Panic, args: &[&str]) -> Command {
     let stamp = prepare();
     let mut cmd = Command::new("cargo");
     cmd.arg(format!("+{}", pinned_toolchain()))
@@ -138,12 +177,23 @@ pub fn apps_cargo(arch: Arch, args: &[&str]) -> Command {
         .current_dir(apps())
         .env("__CARGO_TESTS_ONLY_SRC_ROOT", xtask::library_dir())
         .args(["--target", &arch.target_arg()])
-        .arg("-Zbuild-std=std,panic_abort,test")
-        .arg("--config")
-        .arg(format!(
-            "target.{}.rustflags=[\"--cfg=linux_none_src=\\\"{stamp}\\\"\", \"--check-cfg=cfg(linux_none_src, values(any()))\"]",
-            arch.name()
-        ));
+        .args(["--target-dir", panic.target_dir()]);
+    let panic_flag = match panic {
+        Panic::Abort => {
+            cmd.arg("-Zbuild-std=std,panic_abort,test");
+            ""
+        }
+        Panic::Unwind => {
+            cmd.arg("-Zbuild-std=std,panic_abort,panic_unwind,test")
+                .arg("-Zbuild-std-features=compiler-builtins-mem,backtrace,panic-unwind")
+                .args(["--config", "profile.dev.panic=\"unwind\""]);
+            "\"-Cpanic=unwind\", "
+        }
+    };
+    cmd.arg("--config").arg(format!(
+        "target.{}.rustflags=[{panic_flag}\"--cfg=linux_none_src=\\\"{stamp}\\\"\", \"--check-cfg=cfg(linux_none_src, values(any()))\"]",
+        arch.name()
+    ));
     if let Some(Some(r)) = arch.runner() {
         cmd.arg("--config").arg(format!("target.{}.runner=[\"{}\"]", arch.name(), r.display()));
     }
@@ -155,23 +205,23 @@ pub fn apps_cargo(arch: Arch, args: &[&str]) -> Command {
 static BUILD: Mutex<()> = Mutex::new(());
 
 /// `cargo build <args>` for `arch`; returns the debug output directory.
-fn build(arch: Arch, args: &[&str]) -> PathBuf {
+fn build(arch: Arch, panic: Panic, args: &[&str]) -> PathBuf {
     let _g = BUILD.lock().unwrap_or_else(|e| e.into_inner());
-    let status = apps_cargo(arch, &[&["build"], args].concat()).status().expect("failed to run cargo");
-    assert!(status.success(), "cargo build {args:?} failed for {arch:?}");
-    apps().join("target").join(arch.name()).join("debug")
+    let status = apps_cargo_with(arch, panic, &[&["build"], args].concat()).status().expect("failed to run cargo");
+    assert!(status.success(), "cargo build {args:?} failed for {arch:?} ({panic:?})");
+    apps().join(panic.target_dir()).join(arch.name()).join("debug")
 }
 
-/// Build the example programs for `arch` once per test process and return the
-/// directory holding them.
-pub fn examples_dir(arch: Arch) -> PathBuf {
-    static DIRS: [OnceLock<PathBuf>; 2] = [OnceLock::new(), OnceLock::new()];
-    DIRS[arch as usize].get_or_init(|| build(arch, &["-p", "examples"])).clone()
+/// Build the example programs for `arch` and `panic` once per test process
+/// and return the directory holding them.
+pub fn examples_dir(arch: Arch, panic: Panic) -> PathBuf {
+    static DIRS: [[OnceLock<PathBuf>; 2]; 2] = [const { [const { OnceLock::new() }; 2] }; 2];
+    DIRS[arch as usize][panic as usize].get_or_init(|| build(arch, panic, &["-p", "examples"])).clone()
 }
 
 /// Build the `fuzzee` binary (the linux-none side of the fuzzer) for `arch`.
 pub fn fuzzee_bin(arch: Arch) -> PathBuf {
-    build(arch, &["-p", "fuzzee"]).join("fuzzee")
+    build(arch, Panic::Abort, &["-p", "fuzzee"]).join("fuzzee")
 }
 
 /// A qemu user-mode emulator for aarch64: `$QEMU_AARCH64`, or `qemu-aarch64`

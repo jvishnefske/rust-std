@@ -1,0 +1,229 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: John Vishnefske <jvishnefske@gmail.com>
+Date: Fri, 6 Nov 2026 18:09:31 -0600
+Subject: [PATCH] std: unwinding and backtraces on linux-none with the
+ unwinding crate
+
+There is no libgcc_s or libunwind to link, so the unwind crate uses the
+pure-Rust `unwinding` crate there, as Xous does (features unwinder,
+fde-custom, dwarf-expr; core only). Its exception header reserves six
+words on x86_64, so _Unwind_Exception does too.
+
+sys/pal/linux_none registers the FDE finder at init: the executable's
+.eh_frame_hdr, located by PT_GNU_EH_FRAME in the program headers from
+AT_PHDR (linux_none_rt::elf). Unwinding works with -Cpanic=unwind, and
+_Unwind_Backtrace under either strategy.
+
+backtrace-rs's gimli symbolizer gets a linux-none mmap (through
+linux_none_rt) and a native_libraries that reports the executable from
+the same program headers, in place of libc's mmap and dl_iterate_phdr.
+---
+ library/backtrace/src/symbolize/gimli.rs      |  8 +++-
+ .../src/symbolize/gimli/libs_linux_none.rs    | 27 ++++++++++++
+ .../src/symbolize/gimli/mmap_linux_none.rs    | 44 +++++++++++++++++++
+ library/std/src/sys/pal/linux_none/mod.rs     | 18 ++++++++
+ library/unwind/Cargo.toml                     |  5 +++
+ library/unwind/src/libunwind.rs               |  4 +-
+ library/unwind/src/types.rs                   |  4 +-
+ 7 files changed, 106 insertions(+), 4 deletions(-)
+ create mode 100644 library/backtrace/src/symbolize/gimli/libs_linux_none.rs
+ create mode 100644 library/backtrace/src/symbolize/gimli/mmap_linux_none.rs
+
+diff --git a/library/backtrace/src/symbolize/gimli.rs b/library/backtrace/src/symbolize/gimli.rs
+index cbc0b76..d76aae2 100644
+--- a/library/backtrace/src/symbolize/gimli.rs
++++ b/library/backtrace/src/symbolize/gimli.rs
+@@ -26,7 +26,10 @@ mod mystd {
+ extern crate std as mystd;
+ 
+ cfg_if::cfg_if! {
+-    if #[cfg(windows)] {
++    if #[cfg(all(backtrace_in_libstd, linux_none))] {
++        #[path = "gimli/mmap_linux_none.rs"]
++        mod mmap;
++    } else if #[cfg(windows)] {
+         #[path = "gimli/mmap_windows.rs"]
+         mod mmap;
+     } else if #[cfg(target_vendor = "apple")] {
+@@ -218,6 +221,9 @@ cfg_if::cfg_if! {
+     } else if #[cfg(target_vendor = "apple")] {
+         mod libs_macos;
+         use libs_macos::native_libraries;
++    } else if #[cfg(all(backtrace_in_libstd, linux_none))] {
++        mod libs_linux_none;
++        use libs_linux_none::native_libraries;
+     } else if #[cfg(target_os = "illumos")] {
+         mod libs_illumos;
+         use libs_illumos::native_libraries;
+diff --git a/library/backtrace/src/symbolize/gimli/libs_linux_none.rs b/library/backtrace/src/symbolize/gimli/libs_linux_none.rs
+new file mode 100644
+index 0000000..5633207
+--- /dev/null
++++ b/library/backtrace/src/symbolize/gimli/libs_linux_none.rs
+@@ -0,0 +1,27 @@
++// linux-none: a static executable is the only object, and its program
++// headers come from the auxiliary vector (what dl_iterate_phdr would report).
++
++use super::mystd::env;
++use super::{Library, LibrarySegment};
++use alloc::vec::Vec;
++use linux_none_rt::elf;
++
++pub(super) fn native_libraries() -> Vec<Library> {
++    let headers = elf::program_headers();
++    if headers.is_empty() {
++        return Vec::new();
++    }
++    let mut libs = Vec::new();
++    libs.push(Library {
++        name: env::current_exe().unwrap_or_default().into_os_string(),
++        segments: headers
++            .iter()
++            .map(|header| LibrarySegment {
++                len: header.p_memsz as usize,
++                stated_virtual_memory_address: header.p_vaddr as usize,
++            })
++            .collect(),
++        bias: elf::executable_bias(),
++    });
++    libs
++}
+diff --git a/library/backtrace/src/symbolize/gimli/mmap_linux_none.rs b/library/backtrace/src/symbolize/gimli/mmap_linux_none.rs
+new file mode 100644
+index 0000000..1cdaf15
+--- /dev/null
++++ b/library/backtrace/src/symbolize/gimli/mmap_linux_none.rs
+@@ -0,0 +1,44 @@
++// linux-none: mmap(2) through linux_none_rt (there is no libc to call).
++
++use super::mystd::fs::File;
++use super::mystd::os::unix::prelude::*;
++use core::ops::Deref;
++use core::slice;
++use linux_none_rt::sys;
++
++pub struct Mmap {
++    ptr: usize,
++    len: usize,
++}
++
++impl Mmap {
++    pub unsafe fn map(file: &File, len: usize, offset: u64) -> Option<Mmap> {
++        let ptr = unsafe {
++            sys::mmap(
++                0,
++                len,
++                sys::PROT_READ,
++                sys::MAP_PRIVATE,
++                file.as_raw_fd(),
++                offset.try_into().ok()?,
++            )
++        }
++        .ok()?;
++        Some(Mmap { ptr, len })
++    }
++}
++
++impl Deref for Mmap {
++    type Target = [u8];
++
++    fn deref(&self) -> &[u8] {
++        unsafe { slice::from_raw_parts(self.ptr as *const u8, self.len) }
++    }
++}
++
++impl Drop for Mmap {
++    fn drop(&mut self) {
++        let r = unsafe { sys::munmap(self.ptr, self.len) };
++        debug_assert!(r.is_ok());
++    }
++}
+diff --git a/library/std/src/sys/pal/linux_none/mod.rs b/library/std/src/sys/pal/linux_none/mod.rs
+index 9876228..4d7cf0f 100644
+--- a/library/std/src/sys/pal/linux_none/mod.rs
++++ b/library/std/src/sys/pal/linux_none/mod.rs
+@@ -30,6 +30,8 @@ pub unsafe fn init(argc: isize, argv: *const *const u8, sigpipe: u8) {
+     sanitize_standard_fds();
+     reset_sigpipe(sigpipe);
+     unsafe { stack_overflow::init() };
++    // there is no dl_iterate_phdr for the unwinder to find unwind tables with
++    let _ = unwind::set_custom_eh_frame_finder(&EH_FRAME_FINDER);
+     unsafe { crate::sys::args::init(argc, argv) };
+     // libc's `exit` runs the exiting thread's TLS destructors: so does ours
+     linux_none_rt::start::set_exit_hook(run_thread_exit);
+@@ -73,6 +75,22 @@ fn reset_sigpipe(sigpipe: u8) {
+     }
+ }
+ 
++/// Hands the unwinder (the `unwinding` crate) the executable's
++/// `.eh_frame_hdr`, which `PT_GNU_EH_FRAME` locates. A static executable is
++/// the only object with unwind tables.
++struct EhFrameFinder;
++
++static EH_FRAME_FINDER: EhFrameFinder = EhFrameFinder;
++
++// SAFETY: the address is that of the executable's `.eh_frame_hdr`, which
++// stays mapped for the life of the process.
++unsafe impl unwind::EhFrameFinder for EhFrameFinder {
++    fn find(&self, _pc: usize) -> Option<unwind::FrameInfo> {
++        let hdr = linux_none_rt::elf::eh_frame_hdr()?;
++        Some(unwind::FrameInfo { text_base: None, kind: unwind::FrameInfoKind::EhFrameHdr(hdr) })
++    }
++}
++
+ pub(crate) fn on_broken_pipe_used() -> bool {
+     ON_BROKEN_PIPE_USED.load(Ordering::Relaxed)
+ }
+diff --git a/library/unwind/Cargo.toml b/library/unwind/Cargo.toml
+index 628b9d5..f71ac31 100644
+--- a/library/unwind/Cargo.toml
++++ b/library/unwind/Cargo.toml
+@@ -19,6 +19,11 @@ libc = { version = "0.2.140", features = ['rustc-dep-of-std'], default-features
+ [target.'cfg(target_os = "xous")'.dependencies]
+ unwinding = { version = "0.2.7", features = ['rustc-dep-of-std', 'unwinder', 'fde-custom'], default-features = false }
+ 
++# linux-none: no libgcc_s/libunwind to link; std registers a finder for the
++# executable's .eh_frame_hdr (sys/pal/linux_none)
++[target.'cfg(all(target_os = "linux", target_env = ""))'.dependencies]
++unwinding = { version = "0.2.7", features = ['rustc-dep-of-std', 'unwinder', 'fde-custom', 'dwarf-expr'], default-features = false }
++
+ [features]
+ 
+ # Only applies for Linux and Fuchsia targets
+diff --git a/library/unwind/src/libunwind.rs b/library/unwind/src/libunwind.rs
+index 4dc3cb3..be8262d 100644
+--- a/library/unwind/src/libunwind.rs
++++ b/library/unwind/src/libunwind.rs
+@@ -2,8 +2,8 @@
+ 
+ use core::ffi::{c_int, c_void};
+ 
+-// Use the unwinding crate as unwinder on Xous
+-#[cfg(target_os = "xous")]
++// Use the unwinding crate as unwinder on Xous and linux-none
++#[cfg(any(target_os = "xous", all(target_os = "linux", target_env = "")))]
+ pub use unwinding::custom_eh_frame_finder::{
+     EhFrameFinder, FrameInfo, FrameInfoKind, set_custom_eh_frame_finder,
+ };
+diff --git a/library/unwind/src/types.rs b/library/unwind/src/types.rs
+index d299d8e..5f222ce 100644
+--- a/library/unwind/src/types.rs
++++ b/library/unwind/src/types.rs
+@@ -22,6 +22,8 @@ pub type _Unwind_Word = *const u8;
+ pub const unwinder_private_data_size: usize =
+     cfg_select! {
+         target_arch = "x86" => 5,
++        // linux-none's unwinder (the unwinding crate) reserves libunwind's 6 words
++        all(target_arch = "x86_64", target_os = "linux", target_env = "") => 6,
+         all(target_arch = "x86_64", not(any(target_os = "windows", target_os = "cygwin"))) => 2,
+         all(target_arch = "x86_64", any(target_os = "windows", target_os = "cygwin")) => 6,
+         all(target_arch = "arm", not(target_vendor = "apple")) => 20,
+@@ -56,7 +58,7 @@ pub struct _Unwind_Exception {
+ }
+ 
+ // Check the size of _Unwind_Exception against the source of truth when using the unwinding crate.
+-#[cfg(target_os = "xous")]
++#[cfg(any(target_os = "xous", all(target_os = "linux", target_env = "")))]
+ const _: () = {
+     assert!(size_of::<unwinding::abi::UnwindException>() == size_of::<_Unwind_Exception>());
+ };

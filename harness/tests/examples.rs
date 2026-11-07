@@ -1,5 +1,6 @@
 //! Build each example (plain std programs, apps/examples) for linux-none and
 //! check what it prints: x86_64 natively, aarch64 natively or under qemu.
+//! Each runs built with `panic=abort` and again with `panic=unwind`.
 
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -22,11 +23,14 @@ const EXAMPLES: &[&str] = &[
     "parallelism",
     "stack-overflow",
     "kcopy",
+    "backtrace",
+    "unwind",
 ];
 
 struct Env {
     dir: PathBuf,
     runner: Option<PathBuf>,
+    panic: Panic,
 }
 
 impl Env {
@@ -36,12 +40,12 @@ impl Env {
 }
 
 /// The examples for `arch`, or None (with a note) if they cannot run here.
-fn env(arch: Arch) -> Option<Env> {
+fn env(arch: Arch, panic: Panic) -> Option<Env> {
     let Some(runner) = arch.runner() else {
         eprintln!("skipping {}: set QEMU_AARCH64 or put qemu-aarch64 on PATH", arch.name());
         return None;
     };
-    Some(Env { dir: examples_dir(arch), runner })
+    Some(Env { dir: examples_dir(arch, panic), runner, panic })
 }
 
 fn has(out: &str, needle: &str) {
@@ -229,11 +233,20 @@ fn check_collections(e: &Env) {
     has(&out, "aligned box ok: true");
 }
 
+/// The exit status of a process whose main thread panicked.
+fn assert_panicked(e: &Env, r: &Run) {
+    match e.panic {
+        // SIGABRT: the shell convention is 128+6, but a status without a
+        // code is what a signal-killed process reports
+        Panic::Abort => assert_eq!(r.code(), None, "expected death by signal\n{}", r.stderr()),
+        // the panic unwound out of main, and lang_start exits with 101
+        Panic::Unwind => assert_eq!(r.code(), Some(101), "{}", r.stderr()),
+    }
+}
+
 fn check_panic(e: &Env) {
     let r = e.run("panic", &[], b"", &[]);
-    // SIGABRT: the shell convention is 128+6, but a status without a code
-    // is what a signal-killed process reports
-    assert_eq!(r.code(), None, "expected death by signal");
+    assert_panicked(e, &r);
     has(&r.stdout(), "about to panic");
     has(&r.stderr(), "panicked at examples/src/bin/panic.rs");
     has(&r.stderr(), "index out of bounds: the len is 0 but the index is 11");
@@ -299,7 +312,7 @@ fn check_parallelism(e: &Env) {
     }
 }
 
-fn check_time(e: &Env, arch: Arch) {
+fn check_time(e: &Env, tag: &str) {
     let r = e.run("time", &[], b"", &[]);
     assert_eq!(r.code(), Some(0), "{}", r.stderr());
     assert_eq!(
@@ -311,7 +324,7 @@ fn check_time(e: &Env, arch: Arch) {
     // syscalls. qemu's vDSO (when it has one) makes the syscall itself, so
     // under qemu this only reports them.
     let exe = e.dir.join("time");
-    let trace = std::env::temp_dir().join(format!("linux_none_time_{}_{}", arch.name(), std::process::id()));
+    let trace = std::env::temp_dir().join(format!("linux_none_time_{tag}_{}", std::process::id()));
     let status = match &e.runner {
         None => which("strace").map(|s| Command::new(s).args(["-f", "-qq", "-e", "trace=clock_gettime", "-o"]).arg(&trace).arg(&exe).output()),
         Some(qemu) => {
@@ -326,11 +339,84 @@ fn check_time(e: &Env, arch: Arch) {
             if e.runner.is_none() {
                 assert_eq!(calls, 0, "clock_gettime syscalls despite the vDSO:\n{log}");
             } else {
-                eprintln!("{}: {calls} clock_gettime syscalls under qemu", arch.name());
+                eprintln!("{tag}: {calls} clock_gettime syscalls under qemu");
             }
         }
-        _ => eprintln!("skipping the {} clock_gettime syscall check: cannot trace syscalls", arch.name()),
+        _ => eprintln!("skipping the {tag} clock_gettime syscall check: cannot trace syscalls"),
     }
+}
+
+fn check_backtrace(e: &Env) {
+    let r = e.run("backtrace", &[], b"", &[]);
+    assert_eq!(r.code(), Some(0), "{}", r.stderr());
+    let out = r.stdout();
+    for line in [
+        "status: true",
+        "frames > 3: true",
+        "has backtrace::inner_frame: true",
+        "has backtrace::outer_frame: true",
+        "has backtrace::main: true",
+        "has file:line: true",
+        "inner before outer: true",
+    ] {
+        has(&out, line);
+    }
+
+    // the panic hook's backtrace: symbolized, short (between std's
+    // __rust_end_short_backtrace and __rust_begin_short_backtrace markers)
+    let r = e.run("backtrace", &["panic"], b"", &[("RUST_BACKTRACE", "1")]);
+    assert_panicked(e, &r);
+    let err = r.stderr();
+    has(&err, "index out of bounds: the len is 0 but the index is 12");
+    has(&err, "stack backtrace:");
+    has(&err, "core::panicking::panic_bounds_check");
+    has(&err, ": backtrace::panicking_frame\n");
+    has(&err, ": backtrace::main\n");
+    has(&err, "examples/src/bin/backtrace.rs:20:");
+    assert!(!err.contains("lang_start_internal"), "not a short backtrace:\n{err}");
+    assert!(err.find("panicking_frame").unwrap() < err.find(": backtrace::main").unwrap(), "{err}");
+
+    // RUST_BACKTRACE=full: every frame with its address, down to _start
+    let r = e.run("backtrace", &["panic"], b"", &[("RUST_BACKTRACE", "full")]);
+    let err = r.stderr();
+    // (full symbol names carry the crate's hash: `std[0123abcd]::rt::...`)
+    has(&err, "]::rt::lang_start_internal\n");
+    has(&err, "]::start::start\n");
+    let last_frame = err.lines().rev().find(|l| l.trim_start().split_once(": ").is_some_and(|(n, _)| n.parse::<u32>().is_ok()));
+    assert!(last_frame.is_some_and(|l| l.ends_with(" - _start")), "the walk should end at _start:\n{err}");
+}
+
+fn check_unwind(e: &Env) {
+    let r = e.run("unwind", &[], b"", &[]);
+    assert_panicked(e, &r);
+    let (out, err) = (r.stdout(), r.stderr());
+    if e.panic == Panic::Abort {
+        assert_eq!(out, "strategy unwind: false\n");
+        has(&err, "boom at the bottom");
+        return;
+    }
+    let expected = "\
+strategy unwind: true
+dropped innermost
+dropped frame
+dropped frame
+dropped frame
+dropped frame
+dropped frame
+caught: \"boom at the bottom\", drops: 6
+index panic: index out of bounds: the len is 0 but the index is 3
+thread join: \"thread 7\"
+poisoned: true
+resumed: Some(42) hook skipped: true
+inner caught: true
+outer caught: Some(\"inner\")
+partial sum: 10 err: true
+hook calls: 6
+dropped main's guard
+";
+    assert_eq!(out, expected, "stderr:\n{err}");
+    has(&err, "hook: panicked at examples/src/bin/unwind.rs");
+    has(&err, "uncaught at the end");
 }
 
 fn check_all(e: &Env, tag: &str) {
@@ -346,6 +432,8 @@ fn check_all(e: &Env, tag: &str) {
     check_stack_overflow(e);
     check_parallelism(e);
     check_kcopy(e, tag);
+    check_backtrace(e);
+    check_unwind(e);
 }
 
 fn check_smoke(e: &Env) {
@@ -377,18 +465,19 @@ fn check_static(dir: &Path, machine: u16) {
     }
 }
 
-fn check_arch(arch: Arch) {
-    let Some(e) = env(arch) else {
+fn check_arch(arch: Arch, panic: Panic) {
+    let Some(e) = env(arch, panic) else {
         // still check that it builds and links statically
-        check_static(&examples_dir(arch), arch.machine());
+        check_static(&examples_dir(arch, panic), arch.machine());
         return;
     };
     check_static(&e.dir, arch.machine());
-    check_all(&e, arch.name());
+    let tag = format!("{}_{panic:?}", arch.name());
+    check_all(&e, &tag);
     if e.runner.is_none() {
-        check_kcopy_syscalls(&e, arch.name());
+        check_kcopy_syscalls(&e, &tag);
     }
-    check_time(&e, arch);
+    check_time(&e, &tag);
     // smoke runs itself as a child process
     if arch.can_spawn_self() {
         check_smoke(&e);
@@ -399,10 +488,20 @@ fn check_arch(arch: Arch) {
 
 #[test]
 fn x86_64_examples() {
-    check_arch(Arch::X86_64);
+    check_arch(Arch::X86_64, Panic::Abort);
 }
 
 #[test]
 fn aarch64_examples() {
-    check_arch(Arch::Aarch64);
+    check_arch(Arch::Aarch64, Panic::Abort);
+}
+
+#[test]
+fn x86_64_examples_unwind() {
+    check_arch(Arch::X86_64, Panic::Unwind);
+}
+
+#[test]
+fn aarch64_examples_unwind() {
+    check_arch(Arch::Aarch64, Panic::Unwind);
 }

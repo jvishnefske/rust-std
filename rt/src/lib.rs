@@ -5,6 +5,7 @@
 //!   trampoline and the thread pointer, per architecture.
 //! - [`sys`]: typed syscall wrappers returning `Err(errno)`.
 //! - [`start`]: process entry (`_start` → C `main`), args/env/auxv, exit.
+//! - [`elf`]: the executable's program headers (for TLS and the unwinder).
 //! - [`tls`]: ELF thread-local storage from the `PT_TLS` image.
 //! - [`thread`]: threads on `clone`, joined through `CLONE_CHILD_CLEARTID`.
 //! - [`process`]: child processes on `clone` + `execve`.
@@ -35,6 +36,7 @@ compile_error!("linux_none_rt targets Linux only");
 
 pub mod alloc;
 pub mod dirent;
+pub mod elf;
 pub mod futex;
 pub mod locks;
 pub mod process;

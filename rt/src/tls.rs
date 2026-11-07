@@ -14,10 +14,10 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::elf::{PT_TLS, Phdr};
+
 #[cfg(linux_none)]
 use crate::sys;
-
-const PT_TLS: u32 = 7;
 
 /// Bytes of TCB at the thread pointer that the runtime owns: x86_64's
 /// self-pointer, aarch64's two reserved words.
@@ -52,28 +52,10 @@ pub fn image() -> Image {
     }
 }
 
-/// `Elf64_Phdr`.
-#[cfg_attr(not(linux_none), allow(dead_code))]
-#[repr(C)]
-struct Phdr {
-    p_type: u32,
-    p_flags: u32,
-    p_offset: u64,
-    p_vaddr: u64,
-    p_paddr: u64,
-    p_filesz: u64,
-    p_memsz: u64,
-    p_align: u64,
-}
-
 /// Find `PT_TLS` among the program headers.
-///
-/// # Safety
-/// `phdr` must point to `phnum` valid program headers.
 #[cfg_attr(not(linux_none), allow(dead_code))]
-unsafe fn find_image(phdr: *const Phdr, phnum: usize) -> Image {
-    for i in 0..phnum {
-        let h = unsafe { &*phdr.add(i) };
+fn find_image(phdrs: &[Phdr]) -> Image {
+    for h in phdrs {
         if h.p_type == PT_TLS {
             // a non-PIE executable is not relocated: p_vaddr is the address
             return Image {
@@ -173,11 +155,7 @@ pub(crate) fn thread_word() -> usize {
 /// Record the TLS image and give the main thread its TLS.
 #[cfg(linux_none)]
 pub(crate) unsafe fn init_main_thread() {
-    use crate::start::{AT_PHDR, AT_PHNUM, auxv};
-    let img = match (auxv(AT_PHDR), auxv(AT_PHNUM)) {
-        (Some(p), Some(n)) => unsafe { find_image(p as *const Phdr, n) },
-        _ => Image::EMPTY,
-    };
+    let img = find_image(crate::elf::program_headers());
     ADDR.store(img.addr, Ordering::Relaxed);
     FILESZ.store(img.filesz, Ordering::Relaxed);
     MEMSZ.store(img.memsz, Ordering::Relaxed);

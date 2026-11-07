@@ -106,6 +106,16 @@ unsafe extern "C" {
     fn sin(x: f64) -> f64;
     fn atan2(y: f64, x: f64) -> f64;
     fn log2(x: f64) -> f64;
+    fn malloc(n: usize) -> *mut c_void;
+    fn calloc(count: usize, size: usize) -> *mut c_void;
+    fn realloc(p: *mut c_void, n: usize) -> *mut c_void;
+    fn free(p: *mut c_void);
+    fn posix_memalign(out: *mut *mut c_void, align: usize, n: usize) -> c_int;
+    fn pthread_mutex_lock(m: *mut [c_int; 10]) -> c_int;
+    fn pthread_mutex_trylock(m: *mut [c_int; 10]) -> c_int;
+    fn pthread_mutex_unlock(m: *mut [c_int; 10]) -> c_int;
+    fn strerror_r(e: c_int, buf: *mut c_char, len: usize) -> c_int;
+    fn lseek(fd: c_int, off: i64, whence: c_int) -> i64;
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -282,5 +292,38 @@ fn main() {
         println!("socket listen {ok} accepting {accepting}");
 
         println!("math {:.6} {} {} {:.6} {}", exp(1.0), pow(2.0, 10.0), sin(0.0), atan2(1.0, 1.0), log2(8.0));
+
+        let p = malloc(100) as *mut u8;
+        p.write_bytes(7, 100);
+        let p = realloc(p.cast(), 100_000) as *mut u8;
+        let kept = (0..100).all(|i| *p.add(i) == 7);
+        free(p.cast());
+        let z = calloc(1000, 8) as *mut u64;
+        let zeroed = (0..1000).all(|i| *z.add(i) == 0);
+        free(z.cast());
+        let mut a = std::ptr::null_mut();
+        let r = posix_memalign(&mut a, 4096, 10);
+        println!("malloc realloc {kept} calloc {zeroed} memalign {r} {}", a as usize % 4096);
+        free(a);
+
+        let mut m = [0 as c_int; 10];
+        let locked = pthread_mutex_lock(&mut m);
+        let busy = pthread_mutex_trylock(&mut m);
+        let unlocked = pthread_mutex_unlock(&mut m);
+        println!("pthread_mutex {locked} {busy} {unlocked} {}", pthread_mutex_trylock(&mut m));
+
+        let mut msg = [0 as c_char; 64];
+        let r = strerror_r(2, msg.as_mut_ptr(), msg.len());
+        let short = strerror_r(2, msg.as_mut_ptr().add(32), 4);
+        println!("strerror_r {r} {} short {short} {}", cstr(msg.as_ptr()), cstr(msg.as_ptr().add(32)));
+
+        let tmp = std::env::temp_dir().join(format!("clib-seek-{}", std::process::id()));
+        let f = std::fs::File::create(&tmp).unwrap();
+        std::fs::remove_file(&tmp).unwrap();
+        std::io::Write::write_all(&mut &f, b"12345").unwrap();
+        println!("lseek {} {} errno {}", lseek(f.as_raw_fd(), 1, 0), lseek(f.as_raw_fd(), 0, 2), {
+            lseek(-1, 0, 0);
+            *__errno_location()
+        });
     }
 }

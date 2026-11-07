@@ -10,6 +10,7 @@ const UNLOCKED: u32 = 0;
 const LOCKED: u32 = 1;
 const CONTENDED: u32 = 2;
 
+#[repr(transparent)] // so that clib can lay it over a pthread_mutex_t
 pub struct RawMutex {
     state: AtomicU32,
 }

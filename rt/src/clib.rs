@@ -5,7 +5,8 @@
 //! `cargo xtask libc-fixup`); these are its functions, as musl defines them,
 //! on the runtime's syscalls. They cover what common crates use (terminals,
 //! mmap, CPU counts, epoll, signals, semaphores, users and groups, fork and
-//! exec), not all of libc: C code still needs a C library.
+//! exec, malloc), not all of libc: C stdio is only enough to read
+//! files line by line, and there is no locale.
 //!
 //! Variadic functions (`open`, `ioctl`, `syscall`) take their full argument
 //! list: on x86_64 and aarch64 Linux, variadic integer arguments are passed
@@ -1520,4 +1521,185 @@ static mut MNT_BUF: [u8; 4096] = [0; 4096];
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getmntent(f: *mut FILE) -> *mut mntent {
     unsafe { getmntent_r(f, &raw mut MNT, (&raw mut MNT_BUF).cast(), 4096) }
+}
+
+// ---- the C heap ----
+
+/// A heap block: the user's pointer is preceded by its alignment and the
+/// whole block's size, which free and realloc need for the layout.
+static HEAP: crate::alloc::Allocator = crate::alloc::Allocator::new();
+
+const HEADER: usize = 16;
+
+unsafe fn heap_alloc(n: size_t, align: usize, zeroed: bool) -> *mut c_void {
+    use core::alloc::{GlobalAlloc, Layout};
+    let align = align.max(HEADER);
+    let Some(layout) = n.checked_add(align).and_then(|total| Layout::from_size_align(total, align).ok()) else {
+        set_errno(sys::ENOMEM);
+        return core::ptr::null_mut();
+    };
+    let base = unsafe { if zeroed { HEAP.alloc_zeroed(layout) } else { HEAP.alloc(layout) } };
+    if base.is_null() {
+        set_errno(sys::ENOMEM);
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        let p = base.add(align);
+        p.cast::<usize>().sub(2).write(align);
+        p.cast::<usize>().sub(1).write(layout.size());
+        p.cast()
+    }
+}
+
+/// The block's alignment and size, and its start.
+unsafe fn heap_block(p: *mut c_void) -> (core::alloc::Layout, *mut u8) {
+    unsafe {
+        let align = p.cast::<usize>().sub(2).read();
+        let total = p.cast::<usize>().sub(1).read();
+        (core::alloc::Layout::from_size_align_unchecked(total, align), p.cast::<u8>().sub(align))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn malloc(n: size_t) -> *mut c_void {
+    unsafe { heap_alloc(n, HEADER, false) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn calloc(count: size_t, size: size_t) -> *mut c_void {
+    match count.checked_mul(size) {
+        Some(n) => unsafe { heap_alloc(n, HEADER, true) },
+        None => {
+            set_errno(sys::ENOMEM);
+            core::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free(p: *mut c_void) {
+    use core::alloc::GlobalAlloc;
+    if !p.is_null() {
+        let (layout, base) = unsafe { heap_block(p) };
+        unsafe { HEAP.dealloc(base, layout) }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn realloc(p: *mut c_void, n: size_t) -> *mut c_void {
+    if p.is_null() {
+        return unsafe { malloc(n) };
+    }
+    let (layout, _) = unsafe { heap_block(p) };
+    let old = layout.size() - layout.align();
+    let q = unsafe { heap_alloc(n, layout.align(), false) };
+    if !q.is_null() {
+        unsafe {
+            core::ptr::copy_nonoverlapping(p.cast::<u8>(), q.cast::<u8>(), old.min(n));
+            free(p);
+        }
+    }
+    q
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aligned_alloc(align: size_t, n: size_t) -> *mut c_void {
+    if !align.is_power_of_two() {
+        set_errno(sys::EINVAL);
+        return core::ptr::null_mut();
+    }
+    unsafe { heap_alloc(n, align, false) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn posix_memalign(out: *mut *mut c_void, align: size_t, n: size_t) -> c_int {
+    if !align.is_power_of_two() || align % size_of::<usize>() != 0 {
+        return sys::EINVAL;
+    }
+    let p = unsafe { heap_alloc(n, align, false) };
+    if p.is_null() {
+        return sys::ENOMEM;
+    }
+    unsafe { *out = p };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn malloc_usable_size(p: *mut c_void) -> size_t {
+    if p.is_null() {
+        return 0;
+    }
+    let (layout, _) = unsafe { heap_block(p) };
+    layout.size() - layout.align()
+}
+
+// ---- mutexes ----
+
+/// musl's `pthread_mutex_t`, whose static initializer is all zeros; the
+/// first word is the lock. Only normal (non-recursive) mutexes.
+#[repr(C)]
+pub struct pthread_mutex_t {
+    lock: crate::locks::RawMutex,
+    _rest: [c_int; 9],
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_init(m: *mut pthread_mutex_t, _attr: *const c_void) -> c_int {
+    unsafe { m.write_bytes(0, 1) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_mutex_destroy(_m: *mut pthread_mutex_t) -> c_int {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_lock(m: *mut pthread_mutex_t) -> c_int {
+    unsafe { (*m).lock.lock() };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_trylock(m: *mut pthread_mutex_t) -> c_int {
+    if unsafe { (*m).lock.try_lock() } { 0 } else { sys::EBUSY }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_unlock(m: *mut pthread_mutex_t) -> c_int {
+    unsafe { (*m).lock.unlock() };
+    0
+}
+
+// ---- odds and ends ----
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lseek(fd: c_int, off: i64, whence: c_int) -> i64 {
+    ret(sys::lseek(fd, off, whence as u32)) as i64
+}
+
+/// The real-time signals musl leaves to programs: it keeps 32 to 34.
+#[unsafe(no_mangle)]
+pub extern "C" fn __libc_current_sigrtmin() -> c_int {
+    35
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __libc_current_sigrtmax() -> c_int {
+    64
+}
+
+/// The XSI `strerror_r`, which is musl's; the messages are glibc's.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strerror_r(e: c_int, buf: *mut c_char, len: size_t) -> c_int {
+    let msg = sys::strerror(e).as_bytes();
+    if len == 0 {
+        return sys::ERANGE;
+    }
+    let n = msg.len().min(len - 1);
+    unsafe {
+        core::ptr::copy_nonoverlapping(msg.as_ptr(), buf.cast::<u8>(), n);
+        *buf.add(n) = 0;
+    }
+    if n < msg.len() { sys::ERANGE } else { 0 }
 }

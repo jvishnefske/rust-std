@@ -275,6 +275,10 @@ fn check_clib(e: &Env) {
         "tcgetattr -1 errno 25",
         "socket listen true accepting 1",
         "math 2.718282 1024 0 0.785398 3",
+        "malloc realloc true calloc true memalign 0 0",
+        "pthread_mutex 0 16 0 0",
+        "strerror_r 0 No such file or directory short 34 No ",
+        "lseek 1 5 errno 9",
     ] {
         has(&out, line);
     }

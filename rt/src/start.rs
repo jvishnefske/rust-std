@@ -2,8 +2,9 @@
 //!
 //! On linux-none the kernel enters at `_start` ([`crate::arch`]), which calls
 //! [`start`] with the initial stack pointer. `start` records argc/argv/envp/
-//! auxv, sets up the main thread's TLS, runs `.init_array`, and calls the C
-//! `main` that rustc generates for a binary (which runs std's `lang_start`).
+//! auxv, resolves the vDSO, sets up the main thread's TLS, runs
+//! `.init_array`, and calls the C `main` that rustc generates for a binary
+//! (which runs std's `lang_start`).
 
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
@@ -32,6 +33,7 @@ pub(crate) unsafe extern "C" fn start(sp: *const usize) -> ! {
     }
     unsafe {
         init(sp);
+        crate::vdso::init();
         crate::tls::init_main_thread();
         run_init_array();
         let code = main(ARGC.load(Ordering::Relaxed) as i32, ARGV.load(Ordering::Relaxed));

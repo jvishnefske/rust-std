@@ -31,10 +31,11 @@ small runtime crate instead of libc.
   (variant II on x86_64, variant I on aarch64), threads on `clone` with
   `CLONE_CHILD_CLEARTID` join, process spawning (`clone(CLONE_VM|CLONE_VFORK)`
   + `execve`, or a full fork for `pre_exec` callbacks), an mmap size-class
-  allocator, futexes, `getdents64` parsing, and the alternate signal stacks
-  and guard-page lookup behind std's stack overflow message. Kani proofs
-  cover the allocator's size classes, the TLS layout, syscall error
-  decoding, the dirent parser and the `/proc/self/maps` parser.
+  allocator, futexes, `getdents64` parsing, the alternate signal stacks
+  and guard-page lookup behind std's stack overflow message, and the
+  vDSO's `clock_gettime`. Kani proofs cover the allocator's size classes,
+  the TLS layout, syscall error decoding, the dirent parser, the
+  `/proc/self/maps` parser and the vDSO parser.
 - **`std-patches/`**: a patch series against `library/` of the pinned
   nightly's `rust-src`. It adds `cfg(linux_none)` (linux with an empty
   `target_env`), a `linux_none` arm ahead of the `unix` one in each `sys`
@@ -106,7 +107,14 @@ patched sources if needed, then for x86_64 and for aarch64:
   `available_parallelism` under a two-core quota from
   `systemd-run --user -p CPUQuota=200%` (skipped without it). On x86_64
   with `strace` installed it also checks that `kcopy`'s `io::copy` calls
-  reach `copy_file_range`, `sendfile` and `splice`.
+  reach `copy_file_range`, `sendfile` and `splice`, and that `time` makes
+  no `clock_gettime` syscall. (qemu-user's vDSO functions make the syscall
+  themselves, so under qemu they are only counted.)
+- **The vDSO parser**: `harness/tests/vdso.rs` resolves `clock_gettime` in
+  the host's vDSO and in a copy of qemu-user's aarch64 one (with
+  `DT_GNU_HASH` or `DT_HASH` alone, with and without version tables), and
+  feeds both through every truncation and thousands of corruptions
+  (`VDSO_FUZZ_ITERS`).
 - **std's own tests**: it runs upstream `library/std/tests` (the
   `apps/stdtests` crate) under libtest with `-Zpanic-abort-tests`, so every
   test runs in a child process. Skipped are the ten sync tests that need

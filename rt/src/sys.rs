@@ -353,8 +353,14 @@ pub unsafe fn mprotect(addr: usize, len: usize, prot: usize) -> SysResult {
     unsafe { sc!(nr::MPROTECT, addr, len, prot) }
 }
 
+/// Through the vDSO when there is one ([`crate::vdso`]), else the syscall.
 pub fn clock_gettime(clock: usize) -> Timespec {
     let mut ts = Timespec::default();
+    if let Some(f) = crate::vdso::clock_gettime()
+        && unsafe { f(clock as i32, &mut ts) } == 0
+    {
+        return ts;
+    }
     unsafe { sc!(nr::CLOCK_GETTIME, clock, &mut ts as *mut Timespec) }.expect("clock_gettime failed");
     ts
 }

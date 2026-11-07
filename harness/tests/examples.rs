@@ -17,6 +17,7 @@ const EXAMPLES: &[&str] = &[
     "collections",
     "panic",
     "stdin",
+    "time",
     "smoke",
     "parallelism",
     "stack-overflow",
@@ -298,6 +299,40 @@ fn check_parallelism(e: &Env) {
     }
 }
 
+fn check_time(e: &Env, arch: Arch) {
+    let r = e.run("time", &[], b"", &[]);
+    assert_eq!(r.code(), Some(0), "{}", r.stderr());
+    assert_eq!(
+        r.stdout(),
+        "monotonic: true\nrealtime plausible: true\nelapsed after sleep: true\nthread clock: true\n"
+    );
+
+    // Instant::now and SystemTime::now go through the vDSO: no clock_gettime
+    // syscalls. qemu's vDSO (when it has one) makes the syscall itself, so
+    // under qemu this only reports them.
+    let exe = e.dir.join("time");
+    let trace = std::env::temp_dir().join(format!("linux_none_time_{}_{}", arch.name(), std::process::id()));
+    let status = match &e.runner {
+        None => which("strace").map(|s| Command::new(s).args(["-f", "-qq", "-e", "trace=clock_gettime", "-o"]).arg(&trace).arg(&exe).output()),
+        Some(qemu) => {
+            Some(Command::new(qemu).arg("-strace").arg(&exe).output().inspect(|o| std::fs::write(&trace, &o.stderr).unwrap()))
+        }
+    };
+    let log = std::fs::read_to_string(&trace);
+    let _ = std::fs::remove_file(&trace);
+    match (status, log) {
+        (Some(Ok(o)), Ok(log)) if o.status.success() => {
+            let calls = log.lines().filter(|l| l.contains("clock_gettime(")).count();
+            if e.runner.is_none() {
+                assert_eq!(calls, 0, "clock_gettime syscalls despite the vDSO:\n{log}");
+            } else {
+                eprintln!("{}: {calls} clock_gettime syscalls under qemu", arch.name());
+            }
+        }
+        _ => eprintln!("skipping the {} clock_gettime syscall check: cannot trace syscalls", arch.name()),
+    }
+}
+
 fn check_all(e: &Env, tag: &str) {
     check_hello(e);
     check_args_env(e);
@@ -353,6 +388,7 @@ fn check_arch(arch: Arch) {
     if e.runner.is_none() {
         check_kcopy_syscalls(&e, arch.name());
     }
+    check_time(&e, arch);
     // smoke runs itself as a child process
     if arch.can_spawn_self() {
         check_smoke(&e);

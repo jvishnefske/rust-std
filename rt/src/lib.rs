@@ -13,6 +13,7 @@
 //! - [`alloc`]: an mmap-backed size-class allocator.
 //! - [`futex`], [`locks`]: futex wait/wake and the locks built on them.
 //! - [`dirent`]: parsing `getdents64` buffers.
+//! - [`vdso`]: finding `clock_gettime` in the kernel's vDSO.
 //!
 //! The crate uses only `core`, so std can depend on it. On other Linux
 //! targets (where libc is the C runtime) it builds without `_start`.
@@ -42,5 +43,6 @@ pub mod start;
 pub mod sys;
 pub mod thread;
 pub mod tls;
+pub mod vdso;
 
 pub use arch::nr;

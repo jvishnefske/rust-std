@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: John Vishnefske <jvishnefske@gmail.com>
+Date: Sat, 7 Nov 2026 00:22:26 -0600
+Subject: [PATCH] compiler-builtins: libm's math functions on linux-none
+
+linux-none is unix but has no system libm, so provide the functions
+compiler-builtins leaves to it on other unix targets (exp, pow, sin, ...).
+---
+ library/compiler-builtins/compiler-builtins/src/math/mod.rs | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/library/compiler-builtins/compiler-builtins/src/math/mod.rs b/library/compiler-builtins/compiler-builtins/src/math/mod.rs
+index 3dfa386..1d7d1b9 100644
+--- a/library/compiler-builtins/compiler-builtins/src/math/mod.rs
++++ b/library/compiler-builtins/compiler-builtins/src/math/mod.rs
+@@ -128,7 +128,8 @@ pub mod full_availability {
+ ///   - <https://github.com/rust-lang/rust/issues/114479>
+ ///   - but exclude UEFI since it is a soft-float target
+ ///     - <https://github.com/rust-lang/rust/issues/128533>
+-/// - All unix targets (linux, macos, freebsd, android, etc)
++/// - All unix targets (linux, macos, freebsd, android, etc), except
++///   linux-none, which has no system `libm`
+ /// - wasm with known target_os
+ #[cfg(not(any(
+     all(
+@@ -136,7 +137,7 @@ pub mod full_availability {
+         not(target_feature = "sse2"),
+         not(target_os = "uefi"),
+     ),
+-    unix,
++    all(unix, not(all(target_os = "linux", target_env = ""))),
+     all(target_family = "wasm", not(target_os = "unknown"))
+ )))]
+ pub mod partial_availability {

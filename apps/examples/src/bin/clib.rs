@@ -39,7 +39,9 @@ struct DlPhdrInfo {
     phnum: u16,
 }
 
-#[repr(C, packed)]
+// packed on x86_64 only, as the kernel's
+#[cfg_attr(target_arch = "x86_64", repr(C, packed))]
+#[cfg_attr(not(target_arch = "x86_64"), repr(C))]
 struct EpollEvent {
     events: u32,
     data: u64,

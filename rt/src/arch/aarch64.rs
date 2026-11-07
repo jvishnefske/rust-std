@@ -88,6 +88,8 @@ pub mod nr {
     pub const RECVMSG: usize = 212;
     pub const FLOCK: usize = 32;
     pub const COPY_FILE_RANGE: usize = 285;
+    pub const SENDFILE: usize = 71;
+    pub const SPLICE: usize = 76;
     pub const UNAME: usize = 160;
     pub const PRCTL: usize = 167;
     pub const PRLIMIT64: usize = 261;

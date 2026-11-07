@@ -20,6 +20,7 @@ const EXAMPLES: &[&str] = &[
     "smoke",
     "parallelism",
     "stack-overflow",
+    "kcopy",
 ];
 
 struct Env {
@@ -78,8 +79,90 @@ fn check_fs(e: &Env, tag: &str) {
     has(&out, r#"stem=Some("libfoo.so") ext=Some("1")"#);
     has(&out, r#"components: [CurDir, Normal("a"), ParentDir, Normal("b"), Normal("c")]"#);
     has(&out, "join: /a/b.txt");
+    // what glibc's realpath says for the same tree
+    for line in [
+        r#"canonicalize a/chain2: "a/hello.txt""#,
+        r#"canonicalize a/./b/../chain2: "a/hello.txt""#,
+        r#"canonicalize a/dirlink/: "a/b/c""#,
+        r#"canonicalize a/dirlink/..: "a/b""#,
+        "canonicalize a/dirlink/../../a//b/c/: NotFound",
+        r#"canonicalize a/abs/c/moved.txt: "a/b/c/moved.txt""#,
+        "canonicalize a/hello.txt/: NotADirectory",
+        "canonicalize a/hello.txt/..: NotADirectory",
+        "canonicalize a/chain2/: NotADirectory",
+        "canonicalize a/dangling: NotFound",
+        "canonicalize a/loop1: FilesystemLoop",
+        "canonicalize a/missing/..: NotFound",
+        r#"canonicalize a/b/c/../../../a/b: "a/b""#,
+        r#"canonicalize relative: Some("a/b/c/moved.txt")"#,
+        r#"canonicalize root: "/" empty: Err(NotFound)"#,
+    ] {
+        has(&out, line);
+    }
     has(&out, "cleaned up: true");
     assert!(!dir.exists());
+}
+
+fn check_kcopy(e: &Env, tag: &str) {
+    let dir = std::env::temp_dir().join(format!("linux_none_kcopy_{tag}_{}", std::process::id()));
+    let r = e.run("kcopy", &[dir.to_str().unwrap()], b"", &[]);
+    assert_eq!(r.code(), Some(0), "{}", r.stderr());
+    let out = r.stdout();
+    for line in [
+        "file->file: copied=300000 ok=true",
+        "file->file offset+take: copied=200000 ok=true",
+        "file->append: copied=300000 ok=true",
+        "file->devnull: copied=300000",
+        "pipe->pipe: copied=300000 ok=true",
+        "pipe->file: copied=300000 ok=true",
+        "child->file: copied=300000 ok=true",
+        "child status: exit status: 0",
+        "file->tcp: copied=300000 ok=true",
+        "file->unix->file: copied=300000 ok=true",
+    ] {
+        has(&out, line);
+    }
+    assert!(!dir.exists());
+}
+
+/// Under strace (when it is installed and allowed to trace), the copies in
+/// `kcopy` really go through `copy_file_range`, `sendfile` and `splice`.
+fn check_kcopy_syscalls(e: &Env, tag: &str) {
+    let Some(strace) = which("strace") else {
+        eprintln!("skipping kcopy syscall check: no strace on PATH");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("linux_none_kcopy_strace_{tag}_{}", std::process::id()));
+    let log = std::env::temp_dir().join(format!("linux_none_kcopy_strace_{tag}_{}.log", std::process::id()));
+    // only the main thread (no -f): the copies run there, and `cat` (which
+    // may splice too) stays out of the log
+    let status = Command::new(strace)
+        .args(["-qq", "-e", "trace=copy_file_range,sendfile,splice", "-o"])
+        .arg(&log)
+        .arg(e.dir.join("kcopy"))
+        .arg(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let trace = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
+    if !status.status.success() && trace.is_empty() {
+        eprintln!("skipping kcopy syscall check: strace failed: {}", String::from_utf8_lossy(&status.stderr));
+        return;
+    }
+    assert!(status.status.success(), "kcopy failed under strace: {}", String::from_utf8_lossy(&status.stderr));
+    for call in ["copy_file_range", "sendfile", "splice"] {
+        let used = trace.lines().any(|l| {
+            l.starts_with(&format!("{call}(")) && l.rsplit_once(" = ").is_some_and(|(_, r)| r.split(' ').next().unwrap().parse::<u64>().is_ok_and(|n| n > 0))
+        });
+        assert!(used, "kcopy never moved data with {call}:\n{trace}");
+    }
+}
+
+fn which(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|d| d.join(name)).find(|p| p.is_file())
 }
 
 fn check_threads(e: &Env) {
@@ -227,6 +310,7 @@ fn check_all(e: &Env, tag: &str) {
     check_stdin(e);
     check_stack_overflow(e);
     check_parallelism(e);
+    check_kcopy(e, tag);
 }
 
 fn check_smoke(e: &Env) {
@@ -266,6 +350,9 @@ fn check_arch(arch: Arch) {
     };
     check_static(&e.dir, arch.machine());
     check_all(&e, arch.name());
+    if e.runner.is_none() {
+        check_kcopy_syscalls(&e, arch.name());
+    }
     // smoke runs itself as a child process
     if arch.can_spawn_self() {
         check_smoke(&e);

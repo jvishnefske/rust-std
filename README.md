@@ -89,9 +89,6 @@ that its builds are rebuilt.
   backtraces are empty.
 - **No DNS**: name lookup knows numeric addresses and `/etc/hosts`.
 - **No passwd database**: `env::home_dir` uses `$HOME` only.
-- **`fs::canonicalize`** asks `/proc/self/fd`, so it needs `/proc`.
-- **`io::copy`** copies through a buffer: there is no
-  `copy_file_range`/`sendfile`/`splice` fast path yet.
 - **`os::unix::thread::JoinHandleExt`** hands out the address of the
   runtime's control block for the thread as its `pthread_t` (there are no
   pthreads). `into_pthread_t` detaches the thread, since nothing could join
@@ -107,7 +104,9 @@ patched sources if needed, then for x86_64 and for aarch64:
   `PT_DYNAMIC` or undefined symbol. That includes overflowing the stack of
   the main and of a spawned thread (std's message, then SIGABRT), and
   `available_parallelism` under a two-core quota from
-  `systemd-run --user -p CPUQuota=200%` (skipped without it).
+  `systemd-run --user -p CPUQuota=200%` (skipped without it). On x86_64
+  with `strace` installed it also checks that `kcopy`'s `io::copy` calls
+  reach `copy_file_range`, `sendfile` and `splice`.
 - **std's own tests**: it runs upstream `library/std/tests` (the
   `apps/stdtests` crate) under libtest with `-Zpanic-abort-tests`, so every
   test runs in a child process. Skipped are the ten sync tests that need

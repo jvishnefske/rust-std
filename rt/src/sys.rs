@@ -536,6 +536,12 @@ pub unsafe fn recvmsg(fd: i32, msg: *mut u8, flags: u32) -> SysResult {
 pub unsafe fn copy_file_range(fd_in: i32, off_in: *mut i64, fd_out: i32, off_out: *mut i64, len: usize, flags: u32) -> SysResult {
     unsafe { sc!(nr::COPY_FILE_RANGE, fd_in, off_in, fd_out, off_out, len, flags) }
 }
+pub unsafe fn sendfile(fd_out: i32, fd_in: i32, off: *mut i64, count: usize) -> SysResult {
+    unsafe { sc!(nr::SENDFILE, fd_out, fd_in, off, count) }
+}
+pub unsafe fn splice(fd_in: i32, off_in: *mut i64, fd_out: i32, off_out: *mut i64, len: usize, flags: u32) -> SysResult {
+    unsafe { sc!(nr::SPLICE, fd_in, off_in, fd_out, off_out, len, flags) }
+}
 pub unsafe fn waitid(idtype: u32, id: u32, info: *mut u8, options: u32) -> SysResult {
     unsafe { sc!(nr::WAITID, idtype, id, info, options, 0) }
 }

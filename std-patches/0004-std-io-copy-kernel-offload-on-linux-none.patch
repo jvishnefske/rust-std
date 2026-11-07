@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: John Vishnefske <jvishnefske@gmail.com>
+Date: Fri, 6 Nov 2026 17:40:58 -0600
+Subject: [PATCH] std: io::copy kernel offload on linux-none
+
+Use upstream's sys/io/kernel_copy/linux.rs (copy_file_range, sendfile
+and splice, with its fallbacks) for linux_none too. linux_none.rs gives
+it the three syscalls with libc's signatures and conventions (-1 and
+errno) on linux_none_rt, and a cvt for that convention, in place of
+libc's functions, sys::weak::syscall! and the Result-based sys::cvt.
+---
+ library/std/src/sys/io/kernel_copy/linux.rs   |  9 +++-
+ .../std/src/sys/io/kernel_copy/linux_none.rs  | 50 +++++++++++++++++++
+ library/std/src/sys/io/kernel_copy/mod.rs     |  8 +--
+ 3 files changed, 62 insertions(+), 5 deletions(-)
+ create mode 100644 library/std/src/sys/io/kernel_copy/linux_none.rs
+
+diff --git a/library/std/src/sys/io/kernel_copy/linux.rs b/library/std/src/sys/io/kernel_copy/linux.rs
+index 433fabc..284d0f1 100644
+--- a/library/std/src/sys/io/kernel_copy/linux.rs
++++ b/library/std/src/sys/io/kernel_copy/linux.rs
+@@ -42,7 +42,7 @@
+ //!   progress, they can hit a performance cliff.
+ //! * complexity
+ 
+-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "hurd")))]
++#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "hurd", linux_none)))]
+ use libc::sendfile as sendfile64;
+ #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "hurd"))]
+ use libc::sendfile64;
+@@ -62,9 +62,13 @@ use crate::os::unix::net::UnixStream;
+ use crate::process::{ChildStderr, ChildStdin, ChildStdout};
+ use crate::ptr;
+ use crate::sync::atomic::{Atomic, AtomicBool, AtomicU8, Ordering};
++#[cfg(not(linux_none))]
+ use crate::sys::cvt;
+ use crate::sys::fs::CachedFileMetadata;
++#[cfg(not(linux_none))]
+ use crate::sys::weak::syscall;
++#[cfg(linux_none)]
++use super::linux_none::{copy_file_range, cvt, sendfile64, splice};
+ 
+ #[cfg(test)]
+ mod tests;
+@@ -692,6 +696,7 @@ fn copy_regular_files(reader: RawFd, writer: RawFd, max_len: u64) -> CopyResult
+         _ => true,
+     };
+ 
++    #[cfg(not(linux_none))]
+     syscall!(
+         fn copy_file_range(
+             fd_in: libc::c_int,
+@@ -826,7 +831,7 @@ fn sendfile_splice(mode: SpliceMode, reader: RawFd, writer: RawFd, len: u64) ->
+         ) -> libc::ssize_t;
+     );
+ 
+-    #[cfg(target_os = "linux")]
++    #[cfg(all(target_os = "linux", not(linux_none)))]
+     use libc::splice;
+ 
+     match mode {
+diff --git a/library/std/src/sys/io/kernel_copy/linux_none.rs b/library/std/src/sys/io/kernel_copy/linux_none.rs
+new file mode 100644
+index 0000000..9b450f6
+--- /dev/null
++++ b/library/std/src/sys/io/kernel_copy/linux_none.rs
+@@ -0,0 +1,50 @@
++//! What `linux.rs` takes from libc, on `linux_none_rt` syscalls: the three
++//! copy syscalls with libc's signatures and conventions (`-1` and errno on
++//! failure), and a `cvt` for that convention.
++
++use libc::{c_int, c_uint, size_t, ssize_t};
++use linux_none_rt::sys;
++
++use crate::io;
++use crate::sys::io::set_errno;
++
++fn ret(r: Result<usize, i32>) -> ssize_t {
++    match r {
++        Ok(v) => v as ssize_t,
++        Err(e) => {
++            set_errno(e);
++            -1
++        }
++    }
++}
++
++/// `-1` means failure, with the error in errno.
++pub fn cvt(r: ssize_t) -> io::Result<ssize_t> {
++    if r == -1 { Err(io::Error::last_os_error()) } else { Ok(r) }
++}
++
++pub unsafe fn copy_file_range(
++    fd_in: c_int,
++    off_in: *mut i64,
++    fd_out: c_int,
++    off_out: *mut i64,
++    len: size_t,
++    flags: c_uint,
++) -> ssize_t {
++    ret(unsafe { sys::copy_file_range(fd_in, off_in, fd_out, off_out, len, flags) })
++}
++
++pub unsafe fn sendfile64(out_fd: c_int, in_fd: c_int, offset: *mut i64, count: size_t) -> ssize_t {
++    ret(unsafe { sys::sendfile(out_fd, in_fd, offset, count) })
++}
++
++pub unsafe fn splice(
++    fd_in: c_int,
++    off_in: *mut i64,
++    fd_out: c_int,
++    off_out: *mut i64,
++    len: size_t,
++    flags: c_uint,
++) -> ssize_t {
++    ret(unsafe { sys::splice(fd_in, off_in, fd_out, off_out, len, flags) })
++}
+diff --git a/library/std/src/sys/io/kernel_copy/mod.rs b/library/std/src/sys/io/kernel_copy/mod.rs
+index 2122f37..7777053 100644
+--- a/library/std/src/sys/io/kernel_copy/mod.rs
++++ b/library/std/src/sys/io/kernel_copy/mod.rs
+@@ -1,7 +1,9 @@
+ cfg_select! {
+-    // io::copy copies through a userspace buffer (no copy_file_range,
+-    // sendfile or splice yet)
+-    linux_none => {}
++    linux_none => {
++        // upstream's Linux implementation, over a libc-shaped shim
++        mod linux;
++        mod linux_none;
++    }
+     any(target_os = "linux", target_os = "android") => {
+         mod linux;
+     }

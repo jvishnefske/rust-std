@@ -507,19 +507,34 @@ fn alloc(u: &mut Un, out: &mut String) {
 // ---------------- fs ----------------
 
 const NAMES: &[&str] = &["a", "b", "c", "a/b", "a/c", "b/a", "a/b/c", "a/../b"];
+/// Extra symlink targets: up a level, dangling, trailing slash, `.`.
+const LINK_TARGETS: &[&str] = &["..", "../a", "nowhere", "a/", ".", "b/../a"];
+/// What canonicalize puts after a name.
+const SUFFIXES: &[&str] = &["", "/", "/.", "/..", "/../a", "//", "/./b", "/c/.."];
+/// The ops run this deep inside `root`, so that symlinks to ".." stay inside
+/// it (where both sides see the same tree).
+const DEPTH: &str = "w/w/w/w/w/w";
 
 fn fs(u: &mut Un, out: &mut String, root: &Path) {
     use std::fs;
     let croot = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let rel = |p: &Path| p.strip_prefix(&croot).map(Path::to_path_buf).unwrap_or_else(|_| p.to_path_buf());
+    let rel = |p: &Path| match p.strip_prefix(&croot).or_else(|_| p.strip_prefix(root)) {
+        Ok(r) => r.to_path_buf(),
+        Err(_) => PathBuf::from("<outside>"),
+    };
+    let base = root.join(DEPTH);
+    if let Err(e) = fs::create_dir_all(&base) {
+        let _ = writeln!(out, "setup {}", kind(&e));
+        return;
+    }
     for _ in 0..16 {
         if u.done() {
             break;
         }
         let n1 = NAMES[u.below(NAMES.len())];
         let n2 = NAMES[u.below(NAMES.len())];
-        let (p1, p2) = (root.join(n1), root.join(n2));
-        let line = match u.below(17) {
+        let (p1, p2) = (base.join(n1), base.join(n2));
+        let line = match u.below(21) {
             0 => {
                 let d = u.bytes(6);
                 format!("write {n1} {d:?} {}", res(&fs::write(&p1, &d)))
@@ -556,10 +571,72 @@ fn fs(u: &mut Un, out: &mut String, root: &Path) {
                 // relative symlink target, so it is independent of `root`
                 format!("symlink {n1} -> {n2} {}", res(&std::os::unix::fs::symlink(n2, &p1)))
             }
-            14 => format!("read_link {n1} {}", res(&fs::read_link(&p1))),
+            14 => format!("read_link {n1} {}", res(&fs::read_link(&p1).map(|p| if p.is_absolute() { rel(&p) } else { p }))),
             15 => format!("copy {n1} {n2} {}", res(&fs::copy(&p1, &p2))),
-            _ => format!("canonicalize {n1} {}", res(&fs::canonicalize(&p1).map(|p| rel(&p)))),
+            16 => format!("canonicalize {n1} {}", res(&fs::canonicalize(&p1).map(|p| rel(&p)))),
+            17 => {
+                // targets that climb, dangle, loop (to itself) or are absolute
+                let (shown, target) = match u.below(LINK_TARGETS.len() + 2) {
+                    i if i < LINK_TARGETS.len() => (LINK_TARGETS[i].to_string(), PathBuf::from(LINK_TARGETS[i])),
+                    i if i == LINK_TARGETS.len() => ("self".to_string(), PathBuf::from(Path::new(n1).file_name().unwrap())),
+                    _ => (format!("/{n2}"), p2.clone()),
+                };
+                format!("symlink {n1} -> {shown} {}", res(&std::os::unix::fs::symlink(&target, &p1)))
+            }
+            18 => {
+                let s = SUFFIXES[u.below(SUFFIXES.len())];
+                let p = PathBuf::from(format!("{}{s}", p1.display()));
+                format!("canonicalize {n1}{s} {}", res(&fs::canonicalize(&p).map(|p| rel(&p))))
+            }
+            19 => {
+                // io::copy between files: copy_file_range (or sendfile),
+                // from an offset, through a BufReader, limited, appending
+                let (skip, buffered, mut limit, append) = (u.below(4) as u64, u.below(2) == 1, u.below(8) as u64, u.below(2) == 1);
+                if append {
+                    // appending a file to itself (perhaps under another
+                    // name) without a limit would never end
+                    limit += 1;
+                }
+                let r = (|| {
+                    let mut src = fs::File::open(&p1)?;
+                    src.seek(SeekFrom::Start(skip))?;
+                    let mut dst = fs::OpenOptions::new().write(true).create(true).append(append).truncate(!append).open(&p2)?;
+                    // concrete types: io::copy's kernel offload specializes on them
+                    let n = if buffered {
+                        let mut b = io::BufReader::with_capacity(2, src);
+                        b.fill_buf()?;
+                        b.consume(1);
+                        copy_limited(b, limit, &mut dst)?
+                    } else {
+                        copy_limited(src, limit, &mut dst)?
+                    };
+                    Ok((n, fs::read(&p2)?))
+                })();
+                format!("io_copy {n1} {n2} skip={skip} buf={buffered} limit={limit} append={append} {}", res(&r))
+            }
+            20 => {
+                // io::copy from a pipe into a file: splice
+                let d = u.bytes(6);
+                let limit = u.below(5) as u64;
+                let r = (|| {
+                    let (mut r, mut w) = io::pipe()?;
+                    w.write_all(&d)?;
+                    drop(w);
+                    let mut dst = fs::File::create(&p2)?;
+                    let n = copy_limited(&mut r, limit, &mut dst)?;
+                    let mut left = Vec::new();
+                    r.read_to_end(&mut left)?;
+                    Ok((n, fs::read(&p2)?, left))
+                })();
+                format!("pipe_copy {d:?} {n2} limit={limit} {}", res(&r))
+            }
+            _ => unreachable!(),
         };
         let _ = writeln!(out, "{line}");
     }
+}
+
+/// `io::copy` of all of `r` (`limit` 0) or of `limit` bytes of it.
+fn copy_limited<R: Read>(mut r: R, limit: u64, w: &mut std::fs::File) -> io::Result<u64> {
+    if limit == 0 { io::copy(&mut r, w) } else { io::copy(&mut r.take(limit), w) }
 }

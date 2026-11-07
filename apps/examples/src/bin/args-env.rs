@@ -8,6 +8,8 @@ fn main() {
     println!("after remove: {}", std::env::var_os("RUST_STD_TEST").is_none());
     let cwd = std::env::current_dir().unwrap();
     println!("cwd absolute: {}", cwd.is_absolute());
+    // $HOME, else the home directory /etc/passwd gives the user
+    println!("home: {:?}", std::env::home_dir());
     println!("pid nonzero: {}", std::process::id() != 0);
     // std_detect: cpuid on x86_64, getauxval (from the runtime) on aarch64
     #[cfg(target_arch = "x86_64")]

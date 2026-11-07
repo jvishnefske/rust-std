@@ -33,11 +33,12 @@ small runtime crate instead of libc.
   + `execve`, or a full fork for `pre_exec` callbacks), an mmap size-class
   allocator, futexes, errno, `getdents64` parsing, the alternate signal stacks
   and guard-page lookup behind std's stack overflow message, the vDSO's
-  `clock_gettime`, and the program headers from `AT_PHDR` (what
-  `dl_iterate_phdr` gives a static executable). Kani proofs cover the
+  `clock_gettime`, a DNS stub resolver, `/etc/passwd` lookup, and the
+  program headers from `AT_PHDR` (what `dl_iterate_phdr` gives a static
+  executable). Kani proofs cover the
   allocator's size classes, the TLS layout, syscall error decoding, the
-  dirent parser, the `/proc/self/maps` parser, the vDSO parser and the
-  `PT_GNU_EH_FRAME` lookup.
+  dirent parser, the `/proc/self/maps` parser, the vDSO parser, the
+  `PT_GNU_EH_FRAME` lookup, DNS name decoding and the passwd parser.
 - **`std-patches/`**: a patch series against `library/` of the pinned
   nightly's `rust-src`. It adds `cfg(linux_none)` (linux with an empty
   `target_env`), a `linux_none` arm ahead of the `unix` one in each `sys`
@@ -121,8 +122,11 @@ that its builds are rebuilt.
 - **Panics abort by default**: unwinding needs `-Cpanic=unwind` (above).
   The unwinder only knows the executable's own unwind tables (there are no
   shared objects), and does not unwind through signal frames.
-- **No DNS**: name lookup knows numeric addresses and `/etc/hosts`.
-- **No passwd database**: `env::home_dir` uses `$HOME` only.
+- **Name lookup** reads `/etc/hosts`, then asks the DNS servers in
+  `/etc/resolv.conf` (A and AAAA, TCP for truncated answers): there is no
+  NSS, so no mDNS, `systemd-resolved` varlink or LDAP. Of `options`, only
+  `timeout`, `attempts` and `ndots` count; IPv4 addresses come first.
+- **`env::home_dir`** without `$HOME` reads `/etc/passwd` only (no NSS).
 - **`os::unix::thread::JoinHandleExt`** hands out the address of the
   runtime's control block for the thread as its `pthread_t` (there are no
   pthreads). `into_pthread_t` detaches the thread, since nothing could join
@@ -174,6 +178,10 @@ patched sources if needed, then for x86_64 and for aarch64:
   it with its reason, apart from linux-none gaps, of which there are
   none). These builds add a few minutes; `SKIP_STD_UNITTESTS=1` leaves
   them out.
+- **DNS**: `tests/dns.rs` runs `rt`'s resolver on the host against a fake
+  server on 127.0.0.1 (CNAME chains, TCP fallback, forged replies,
+  timeouts, search domains). The `resolve` example checks lookups through
+  std with the host's `/etc/resolv.conf`, if the host can resolve names.
 - **Differential fuzzing**: `apps/fuzzee/ops.rs` runs both in-process
   against the host's std and in the `fuzzee` binary against linux-none's
   std, and the transcripts must match (`FUZZ_SEED`, `FUZZ_ITERS`,

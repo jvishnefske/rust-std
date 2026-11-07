@@ -2,6 +2,7 @@
 //! check what it prints: x86_64 natively, aarch64 natively or under qemu.
 //! Each runs built with `panic=abort` and again with `panic=unwind`.
 
+use std::net::{IpAddr, ToSocketAddrs};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,6 +16,7 @@ const EXAMPLES: &[&str] = &[
     "threads",
     "process",
     "net",
+    "resolve",
     "collections",
     "panic",
     "stdin",
@@ -36,6 +38,10 @@ struct Env {
 impl Env {
     fn run(&self, name: &str, args: &[&str], stdin: &[u8], env: &[(&str, &str)]) -> Run {
         run(&self.dir, self.runner.as_deref(), name, args, stdin, env)
+    }
+
+    fn run_unset(&self, name: &str, args: &[&str], unset: &[&str]) -> Run {
+        run_unset(&self.dir, self.runner.as_deref(), name, args, b"", &[], unset)
     }
 }
 
@@ -59,7 +65,7 @@ fn check_hello(e: &Env) {
 }
 
 fn check_args_env(e: &Env) {
-    let r = e.run("args-env", &["one", "two words"], b"", &[("RUST_STD_TEST", "orig")]);
+    let r = e.run("args-env", &["one", "two words"], b"", &[("RUST_STD_TEST", "orig"), ("HOME", "/from/env")]);
     assert_eq!(r.code(), Some(0), "{}", r.stderr());
     let out = r.stdout();
     has(&out, r#"args: ["one", "two words"]"#);
@@ -68,6 +74,25 @@ fn check_args_env(e: &Env) {
     has(&out, "after remove: true");
     has(&out, "cwd absolute: true");
     has(&out, "cpu feature detected: true");
+    has(&out, r#"home: Some("/from/env")"#);
+
+    // without $HOME, or with it empty: /etc/passwd's entry for the user
+    let want = format!("home: {:?}", passwd_home());
+    let r = e.run_unset("args-env", &[], &["HOME"]);
+    assert_eq!(r.code(), Some(0), "{}", r.stderr());
+    has(&r.stdout(), &want);
+    has(&e.run("args-env", &[], b"", &[("HOME", "")]).stdout(), &want);
+}
+
+/// The home directory `getent` reports for the current user, if it comes
+/// from /etc/passwd (the only database linux-none reads).
+fn passwd_home() -> Option<PathBuf> {
+    let uid = String::from_utf8(Command::new("id").arg("-u").output().unwrap().stdout).unwrap();
+    let out = Command::new("getent").args(["passwd", uid.trim()]).output().unwrap();
+    let entry = String::from_utf8(out.stdout).unwrap();
+    let entry = entry.trim_end();
+    let in_files = std::fs::read_to_string("/etc/passwd").unwrap().lines().any(|l| l == entry);
+    if in_files { entry.split(':').nth(5).map(PathBuf::from) } else { None }
 }
 
 fn check_fs(e: &Env, tag: &str) {
@@ -218,8 +243,46 @@ fn check_net(e: &Env) {
     has(&out, r#"tcp echo: "SECOND\n""#);
     has(&out, r#"udp: "ping" from a: true"#);
     has(&out, "refused: ConnectionRefused");
-    // no resolver: only numeric addresses and localhost
+    // `.invalid` names never resolve, with or without a network
     has(&out, "dns: Uncategorized");
+}
+
+/// Name lookup through std, with the system's configuration: /etc/hosts,
+/// and DNS if the host (glibc, in this process) can resolve a name.
+fn check_resolve(e: &Env) {
+    let r = e.run("resolve", &["localhost", "nonexistent.invalid", "a..b"], b"", &[]);
+    assert_eq!(r.code(), Some(0), "{}", r.stderr());
+    let out = r.stdout();
+    has(&out, "localhost: Ok([127.0.0.1");
+    has(&out, "nonexistent.invalid: Err(Uncategorized) failed to lookup address information");
+    has(&out, "a..b: Err(Uncategorized) failed to lookup address information: Name does not resolve");
+
+    const NAME: &str = "example.com";
+    let host: Vec<IpAddr> = match (NAME, 0).to_socket_addrs() {
+        Ok(addrs) => addrs.map(|a| a.ip()).collect(),
+        Err(err) => {
+            eprintln!("skipping DNS with the system resolver: the host cannot resolve {NAME}: {err}");
+            return;
+        }
+    };
+    let r = e.run("resolve", &[NAME], b"", &[]);
+    let out = r.stdout();
+    let ours: Vec<IpAddr> = out
+        .trim()
+        .strip_prefix(&format!("{NAME}: Ok(["))
+        .and_then(|l| l.strip_suffix("])"))
+        .unwrap_or_else(|| panic!("{NAME} does not resolve on linux-none, but does on the host ({host:?}):\n{out}"))
+        .split(", ")
+        .map(|a| a.parse().unwrap())
+        .collect();
+    // the answers may rotate, but the families match
+    for v6 in [false, true] {
+        assert_eq!(
+            host.iter().any(|a| a.is_ipv6() == v6),
+            ours.iter().any(|a| a.is_ipv6() == v6),
+            "host {host:?}, linux-none {ours:?}"
+        );
+    }
 }
 
 fn check_collections(e: &Env) {
@@ -426,6 +489,7 @@ fn check_all(e: &Env, tag: &str) {
     check_threads(e);
     check_process(e);
     check_net(e);
+    check_resolve(e);
     check_collections(e);
     check_panic(e);
     check_stdin(e);

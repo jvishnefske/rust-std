@@ -36,7 +36,8 @@ fn main() -> std::io::Result<()> {
         Err(e) => println!("refused: {:?}", e.kind()),
         Ok(_) => println!("unexpected connect"),
     }
-    match TcpStream::connect("example.com:80") {
+    // `.invalid` never resolves (RFC 6761)
+    match TcpStream::connect("nonexistent.invalid:80") {
         Err(e) => println!("dns: {:?}", e.kind()),
         Ok(_) => println!("unexpected dns"),
     }

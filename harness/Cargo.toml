@@ -12,5 +12,6 @@ path = "src/lib.rs"
 xtask = { path = "../xtask" }
 
 [dev-dependencies]
-# host-side tests of the runtime's pure parts (the vDSO parser)
+# host-side tests of the runtime's pure parts (the vDSO parser), and of
+# its DNS resolver against a fake server (tests/dns.rs)
 linux_none_rt = { path = "../rt" }

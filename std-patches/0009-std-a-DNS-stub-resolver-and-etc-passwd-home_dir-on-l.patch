@@ -1,0 +1,170 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: John Vishnefske <jvishnefske@gmail.com>
+Date: Fri, 6 Nov 2026 17:52:06 -0600
+Subject: [PATCH] std: a DNS stub resolver and /etc/passwd home_dir on
+ linux-none
+
+getaddrinfo falls back to DNS after numeric addresses, /etc/hosts and
+localhost: linux_none_rt::dns with /etc/resolv.conf, and query ids from
+sys::random. It honours hints.ai_family, and EAI_SYSTEM carries errno.
+
+env::home_dir without $HOME reads the user's entry in /etc/passwd, as
+getpwuid_r does with only the files database.
+
+Claude-Session: https://claude.ai/code/session_01LLGNtp1UxYCVKzoSmxmpts
+---
+ .../sys/net/connection/socket/linux_none.rs   | 28 ++++++++++---
+ .../net/connection/socket/linux_none/dns.rs   | 39 +++++++++++++++++++
+ library/std/src/sys/paths/unix.rs             |  8 +++-
+ 3 files changed, 68 insertions(+), 7 deletions(-)
+ create mode 100644 library/std/src/sys/net/connection/socket/linux_none/dns.rs
+
+diff --git a/library/std/src/sys/net/connection/socket/linux_none.rs b/library/std/src/sys/net/connection/socket/linux_none.rs
+index 4e83afd..3d4e26c 100644
+--- a/library/std/src/sys/net/connection/socket/linux_none.rs
++++ b/library/std/src/sys/net/connection/socket/linux_none.rs
+@@ -4,8 +4,8 @@
+ //! platform through `netc`, which elsewhere is libc. Here `netc` is libc's
+ //! types and constants plus [`netc`]'s own functions, with libc's signatures
+ //! and conventions (`-1` and errno on failure), on `linux_none_rt` syscalls.
+-//! Host name lookup knows numeric addresses and `/etc/hosts`: there is no
+-//! DNS resolver.
++//! Host name lookup knows numeric addresses and `/etc/hosts`, then asks the
++//! DNS servers in `/etc/resolv.conf` (`linux_none_rt::dns`).
+ 
+ #![allow(dead_code)]
+ 
+@@ -25,6 +25,8 @@ use super::socket_addr_to_c;
+ #[expect(non_camel_case_types)]
+ pub type wrlen_t = libc::size_t;
+ 
++mod dns;
++
+ /// libc's interface to sockets, on raw syscalls.
+ pub(crate) mod netc {
+     #![allow(non_camel_case_types)]
+@@ -139,9 +141,9 @@ pub(crate) mod netc {
+         addr: sockaddr_storage,
+     }
+ 
+-    /// `getaddrinfo` for a numeric address or a name in `/etc/hosts`
+-    /// (`localhost` resolves even without one); there is no DNS resolver.
+-    /// Only `node` and `hints.ai_socktype` are looked at.
++    /// `getaddrinfo` for a numeric address, a name in `/etc/hosts`
++    /// (`localhost` resolves even without one) or else in DNS. Only `node`,
++    /// `hints.ai_family` and `hints.ai_socktype` are looked at.
+     pub unsafe fn getaddrinfo(
+         node: *const c_char,
+         _service: *const c_char,
+@@ -152,6 +154,7 @@ pub(crate) mod netc {
+ 
+         let host = unsafe { crate::ffi::CStr::from_ptr(node) }.to_bytes();
+         let socktype = unsafe { hints.as_ref() }.map_or(0, |h| h.ai_socktype);
++        let family = unsafe { hints.as_ref() }.map_or(AF_UNSPEC, |h| h.ai_family);
+         let numeric = crate::str::from_utf8(host).ok().and_then(|h| h.parse::<IpAddr>().ok());
+         let mut addrs: Vec<IpAddr> = match numeric {
+             Some(a) => vec![a],
+@@ -160,6 +163,13 @@ pub(crate) mod netc {
+         if addrs.is_empty() && host.eq_ignore_ascii_case(b"localhost") {
+             addrs = vec![IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)];
+         }
++        addrs.retain(|a| family == AF_UNSPEC || (family == AF_INET) == a.is_ipv4());
++        if addrs.is_empty() && numeric.is_none() {
++            addrs = match super::dns::lookup(host, family) {
++                Ok(addrs) => addrs,
++                Err(e) => return e,
++            };
++        }
+         if addrs.is_empty() {
+             return EAI_NONAME;
+         }
+@@ -213,7 +223,10 @@ pub(crate) mod netc {
+ 
+     pub fn gai_strerror(err: c_int) -> &'static str {
+         match err {
+-            EAI_NONAME => "Name does not resolve (no DNS resolver on linux-none)",
++            EAI_NONAME => "Name does not resolve",
++            EAI_AGAIN => "Temporary failure in name resolution",
++            EAI_FAIL => "Non-recoverable failure in name resolution",
++            EAI_SYSTEM => "System error",
+             _ => "Unknown error",
+         }
+     }
+@@ -261,6 +274,9 @@ pub fn cvt_gai(err: c_int) -> io::Result<()> {
+     if err == 0 {
+         return Ok(());
+     }
++    if err == netc::EAI_SYSTEM {
++        return Err(io::Error::last_os_error());
++    }
+     let detail = netc::gai_strerror(err);
+     Err(io::Error::new(
+         io::ErrorKind::Uncategorized,
+diff --git a/library/std/src/sys/net/connection/socket/linux_none/dns.rs b/library/std/src/sys/net/connection/socket/linux_none/dns.rs
+new file mode 100644
+index 0000000..a1ae00d
+--- /dev/null
++++ b/library/std/src/sys/net/connection/socket/linux_none/dns.rs
+@@ -0,0 +1,39 @@
++//! DNS for `getaddrinfo`: `linux_none_rt::dns` with the configuration in
++//! `/etc/resolv.conf` and query ids from the system's random source.
++
++use linux_none_rt::dns::{self, Config, Error, Family};
++
++use super::netc::{AF_INET, AF_INET6, EAI_AGAIN, EAI_FAIL, EAI_NONAME, EAI_SYSTEM, c_int};
++use crate::net::{IpAddr, Ipv4Addr};
++
++/// Addresses kept from one answer, as musl does.
++const MAXADDRS: usize = 48;
++
++/// `host`'s addresses of `family` (`AF_UNSPEC`, `AF_INET` or `AF_INET6`),
++/// or the `EAI_*` code (with errno set for `EAI_SYSTEM`).
++pub fn lookup(host: &[u8], family: c_int) -> Result<Vec<IpAddr>, c_int> {
++    let family = match family {
++        AF_INET => Family::V4,
++        AF_INET6 => Family::V6,
++        _ => Family::Any,
++    };
++    // a missing file means the defaults: ask 127.0.0.1
++    let conf = Config::parse(&crate::fs::read("/etc/resolv.conf").unwrap_or_default());
++    let mut random = || {
++        let mut id = [0; 2];
++        crate::sys::random::fill_bytes(&mut id);
++        u16::from_ne_bytes(id)
++    };
++    let mut buf = vec![0u8; 65535];
++    let mut out = [IpAddr::V4(Ipv4Addr::UNSPECIFIED); MAXADDRS];
++    match dns::lookup(&conf, host, family, &mut random, &mut buf, &mut out) {
++        Ok(n) => Ok(out[..n].to_vec()),
++        Err(Error::NoName) => Err(EAI_NONAME),
++        Err(Error::Again) => Err(EAI_AGAIN),
++        Err(Error::Fail) => Err(EAI_FAIL),
++        Err(Error::Sys(e)) => {
++            crate::sys::io::set_errno(e);
++            Err(EAI_SYSTEM)
++        }
++    }
++}
+diff --git a/library/std/src/sys/paths/unix.rs b/library/std/src/sys/paths/unix.rs
+index dabe06d..ef42b35 100644
+--- a/library/std/src/sys/paths/unix.rs
++++ b/library/std/src/sys/paths/unix.rs
+@@ -465,11 +465,17 @@ pub fn home_dir() -> Option<PathBuf> {
+         target_os = "vita",
+         target_os = "nuttx",
+         all(target_vendor = "apple", not(target_os = "macos")),
+-        linux_none, // no passwd database without libc
+     ))]
+     unsafe fn fallback() -> Option<OsString> {
+         None
+     }
++    // getpwuid_r with only the `files` database: no NSS without libc
++    #[cfg(linux_none)]
++    unsafe fn fallback() -> Option<OsString> {
++        let passwd = crate::fs::read("/etc/passwd").ok()?;
++        let dir = linux_none_rt::passwd::home_dir(&passwd, linux_none_rt::sys::getuid())?;
++        Some(OsStringExt::from_vec(dir.to_vec()))
++    }
+     #[cfg(not(any(
+         target_os = "android",
+         target_os = "emscripten",

@@ -253,6 +253,19 @@ impl Run {
 
 /// Run a binary from `dir`, natively or through `runner` (e.g. qemu).
 pub fn run(dir: &Path, runner: Option<&Path>, name: &str, args: &[&str], stdin: &[u8], env: &[(&str, &str)]) -> Run {
+    run_unset(dir, runner, name, args, stdin, env, &[])
+}
+
+/// [`run`], with the variables in `unset` removed from the environment.
+pub fn run_unset(
+    dir: &Path,
+    runner: Option<&Path>,
+    name: &str,
+    args: &[&str],
+    stdin: &[u8],
+    env: &[(&str, &str)],
+    unset: &[&str],
+) -> Run {
     use std::io::Write;
     let exe = dir.join(name);
     // run via sh to disable core dumps: the panic example aborts on purpose,
@@ -263,6 +276,9 @@ pub fn run(dir: &Path, runner: Option<&Path>, name: &str, args: &[&str], stdin: 
         cmd.arg(r);
     }
     cmd.arg(&exe);
+    for var in unset {
+        cmd.env_remove(var);
+    }
     cmd.args(args).envs(env.iter().copied()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().unwrap_or_else(|e| panic!("failed to start {}: {e}", exe.display()));
     child.stdin.take().unwrap().write_all(stdin).unwrap();

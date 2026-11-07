@@ -15,6 +15,9 @@
 //! `std-src` in DIR (rt copied in, no rustup), for builds without rustup
 //! such as the Nix flake; `$LINUX_NONE_STD_SRC` points the harness at it.
 //!
+//! `cargo xtask libc-fixup DIR` applies the libc fixup to the libc crate in
+//! DIR, for crates outside std that depend on another libc version.
+//!
 //! `cargo xtask export-patches` writes the commits on top of `base` back to
 //! `std-patches/`, so the patched tree can be edited in place.
 
@@ -198,7 +201,7 @@ fn libc_dir(library: &Path) -> io::Result<PathBuf> {
 /// libc has no items for linux with an empty `target_env`. std only needs its
 /// types and constants (for `os::unix` and friends), and musl's match the
 /// kernel's, so select musl's definitions for linux-none too.
-fn libc_as_musl(dir: &Path) -> io::Result<()> {
+pub fn libc_as_musl(dir: &Path) -> io::Result<()> {
     const FROM: &str = "target_env = \"musl\"";
     const TO: &str = "any(target_env = \"musl\", all(target_os = \"linux\", target_env = \"\"))";
     for f in walk(&dir.join("src"))? {
@@ -209,26 +212,21 @@ fn libc_as_musl(dir: &Path) -> io::Result<()> {
             }
         }
     }
-    // ...except for linking: there is no libc to link
+    // ...except for linking: there is no libc to link. The arm goes first in
+    // the `cfg_if!` that links libc, whose arm order varies between versions.
     let f = dir.join("src/unix/mod.rs");
-    let s = fs::read_to_string(&f)?;
-    let edits = [
-        (format!("all({TO}, not(libc_pauthtest))"), format!("all({FROM}, not(libc_pauthtest))")),
-        (
-            "    } else if #[cfg(target_os = \"emscripten\")] {".to_string(),
-            "    } else if #[cfg(all(target_os = \"linux\", target_env = \"\"))] {\n        \
-             // linux-none: no libc to link\n    \
-             } else if #[cfg(target_os = \"emscripten\")] {"
-                .to_string(),
-        ),
-    ];
-    let mut s = s;
-    for (from, to) in edits {
-        if s.matches(&from).count() != 1 {
-            return Err(err(format!("libc fixup: `{from}` not found exactly once in {}", f.display())));
-        }
-        s = s.replace(&from, &to);
-    }
+    let mut s = fs::read_to_string(&f)?;
+    const ARMS: &str = "cfg_if! {\n    if #[cfg(";
+    let at = s
+        .find("name = \"c\"")
+        .and_then(|link| s[..link].rfind(ARMS))
+        .ok_or_else(|| err(format!("libc fixup: the libc link `cfg_if!` not found in {}", f.display())))?;
+    s.insert_str(
+        at + "cfg_if! {\n    ".len(),
+        "if #[cfg(all(target_os = \"linux\", target_env = \"\"))] {\n        \
+         // linux-none: no libc to link\n    \
+         } else ",
+    );
     fs::write(&f, s)?;
     Ok(())
 }

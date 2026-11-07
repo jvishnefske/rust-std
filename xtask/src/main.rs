@@ -3,7 +3,7 @@ use std::process::exit;
 
 use std::path::PathBuf;
 
-use xtask::{Options, export_patches, sysroot};
+use xtask::{Options, export_patches, libc_as_musl, sysroot};
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -16,9 +16,10 @@ fn main() {
             };
             sysroot(&opts)
         }
+        Some("libc-fixup") if args.len() == 2 => libc_as_musl(&PathBuf::from(&args[1])),
         Some("export-patches") => export_patches(),
         _ => {
-            eprintln!("usage: cargo xtask sysroot [--force] [--out DIR] [--no-toolchain] | export-patches");
+            eprintln!("usage: cargo xtask sysroot [--force] [--out DIR] [--no-toolchain] | libc-fixup DIR | export-patches");
             exit(2)
         }
     };

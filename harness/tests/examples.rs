@@ -275,6 +275,7 @@ fn check_clib_more(e: &Env) {
         "sscanf 4 31 42 word! x n 17 none -1 stop 1 7\n",
         "pthread_once ran 1 [0, 0, 0, 0] again 1\n",
         "getauxval 4096 0 nanosleep 0 true\n",
+        "sched_setaffinity 0\n",
     ] {
         has(&out, line);
     }

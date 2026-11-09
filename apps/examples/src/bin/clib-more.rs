@@ -73,6 +73,8 @@ unsafe extern "C" {
     fn getauxval(key: u64) -> u64;
     fn nanosleep(req: *const [i64; 2], rem: *mut [i64; 2]) -> c_int;
     fn perror(s: *const c_char);
+    fn sched_getaffinity(pid: c_int, size: usize, set: *mut u64) -> c_int;
+    fn sched_setaffinity(pid: c_int, size: usize, set: *const u64) -> c_int;
 }
 
 static ONCE_RAN: AtomicUsize = AtomicUsize::new(0);
@@ -359,6 +361,9 @@ fn main() {
         let t0 = std::time::Instant::now();
         let slept = nanosleep(&[0, 20_000_000], std::ptr::null_mut());
         println!("getauxval {} {} nanosleep {slept} {}", getauxval(6), getauxval(12345), t0.elapsed().as_millis() >= 20);
+        let mut set = [0u64; 16];
+        sched_getaffinity(0, 128, set.as_mut_ptr());
+        println!("sched_setaffinity {}", sched_setaffinity(0, 128, set.as_ptr()));
         *__errno_location() = 2;
         perror(c"perror".as_ptr());
     }

@@ -440,6 +440,11 @@ pub unsafe extern "C" fn sched_getaffinity(pid: pid_t, size: size_t, mask: *mut 
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn sched_setaffinity(pid: pid_t, size: size_t, set: *const c_void) -> c_int {
+    ret_int(unsafe { sys::syscall(nr::SCHED_SETAFFINITY, [pid as usize, size, set as usize, 0, 0, 0]) })
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn sched_yield() -> c_int {
     sys::sched_yield();
     0

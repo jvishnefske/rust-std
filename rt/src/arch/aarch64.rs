@@ -127,6 +127,7 @@ pub mod nr {
     pub const LGETXATTR: usize = 9;
     pub const LISTXATTR: usize = 11;
     pub const LLISTXATTR: usize = 12;
+    pub const SCHED_SETAFFINITY: usize = 122;
 }
 
 /// # Safety

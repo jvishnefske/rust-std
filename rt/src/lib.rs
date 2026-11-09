@@ -25,7 +25,7 @@
 //! targets (where libc is the C runtime) it builds without `_start`.
 
 #![no_std]
-#![cfg_attr(linux_none, feature(thread_local))]
+#![cfg_attr(linux_none, feature(thread_local, c_variadic))]
 #![allow(clippy::missing_safety_doc, clippy::new_without_default)]
 
 #[cfg(target_arch = "aarch64")]

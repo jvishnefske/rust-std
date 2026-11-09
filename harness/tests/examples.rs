@@ -28,6 +28,7 @@ const EXAMPLES: &[&str] = &[
     "backtrace",
     "unwind",
     "clib",
+    "clib_more",
 ];
 
 struct Env {
@@ -244,6 +245,40 @@ fn passwd_entry() -> Option<Vec<String>> {
         .lines()
         .map(|l| l.split(':').map(String::from).collect::<Vec<_>>())
         .find(|f| f.len() == 7 && f[2] == uid.trim())
+}
+
+fn check_clib_more(e: &Env) {
+    let r = e.run("clib_more", &[], b"", &[("CLIB_MORE", "1")]);
+    assert_eq!(r.code(), Some(0), "{}", r.stderr());
+    let out = r.stdout();
+    for line in [
+        "strchr o, world strrchr orld strstr world strstr-miss NULL\n",
+        "strcmp -1 0 strncasecmp 0 strncpy [97, 98, 0, 0, 0, 85] strnlen 3 memchr 5\n",
+        "strerror No such file or directory strsignal Segmentation fault\n",
+        "ctype a true space true 7 true -1 0 toupper Q\n",
+        "strtol -31 rest z big true erange true strtoul 511\n",
+        "snprintf 78 [-42|   ab|ff  |003.1|Z|18446744073709551615|(null)|%|1.235e+04|0.0001|0x1234]\n",
+        "snprintf truncated 8 long-\n",
+        "fputs stdout\n",
+        "pthread_key main 7 thread 0 dtor 99 delete 0\n",
+        "pthread_rwlock 16 0 0\n",
+        "pthread_getattr_np main true thread (true, true) true\n",
+        "pthread_atfork log 11 child exit 42\n",
+        r#"files mkdir 0 rename 0 link 0 readlink 1 realpath true mkfifo 0 readdir [".", "..", "b", "c", "f", "l"] rmdir 0 missing -1 errno 2"#,
+        "session getsid true getpgid true ttyname_r 9 tcgetpgrp -1 errno 9\n",
+        "cfmakeraw iflag 0x0 lflag 0x0 cflag 0x30\n",
+        "select 0 1 time true\n",
+        "getgrouplist first 12345 n true short -1 true\n",
+        "langinfo UTF-8 Wednesday Dec %a %b %e %H:%M:%S %Y\n",
+        "iconv open true copy true left 1 2big true other true\n",
+        "environ 1 popcount 64\n",
+    ] {
+        has(&out, line);
+    }
+    // a pseudo-terminal, where the system has them
+    if std::path::Path::new("/dev/ptmx").exists() && !out.contains("openpty none") {
+        has(&out, "openpty true ttyname_r 0 same true\n");
+    }
 }
 
 fn check_clib(e: &Env) {
@@ -574,6 +609,7 @@ fn check_all(e: &Env, tag: &str) {
     check_backtrace(e);
     check_unwind(e);
     check_clib(e);
+    check_clib_more(e);
 }
 
 fn check_smoke(e: &Env) {

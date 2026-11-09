@@ -106,6 +106,7 @@ impl RawCondvar {
 /// Reader-writer lock. State: number of readers, or `WRITER`.
 /// Waiters all sleep on `state` and are all woken on release; simple and
 /// correct, at the cost of thundering herds under heavy contention.
+#[repr(C)] // so that clib can lay it over a pthread_rwlock_t
 pub struct RawRwLock {
     state: AtomicU32,
     waiters: AtomicU32,
@@ -134,6 +135,11 @@ impl RawRwLock {
             }
             self.sleep(s);
         }
+    }
+
+    /// Whether a writer holds it (else readers, or nobody).
+    pub fn is_write_locked(&self) -> bool {
+        self.state.load(Relaxed) == WRITER
     }
 
     pub fn try_write(&self) -> bool {

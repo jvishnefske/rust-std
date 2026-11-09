@@ -18,6 +18,12 @@
 
 #![allow(non_camel_case_types)]
 
+mod pthread;
+mod stdio;
+mod string;
+
+use string::strcpy;
+
 use core::ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -918,7 +924,7 @@ pub unsafe extern "C" fn getgrnam(name: *const c_char) -> *mut group {
 #[unsafe(no_mangle)]
 pub extern "C" fn fork() -> pid_t {
     // a child with a copy of the address space, like the kernel's fork
-    ret_int(unsafe { sys::syscall(nr::CLONE, [sys::SIGCHLD, 0, 0, 0, 0, 0]) })
+    pthread::with_handlers(|| ret(unsafe { sys::syscall(nr::CLONE, [sys::SIGCHLD, 0, 0, 0, 0, 0]) })) as pid_t
 }
 
 #[unsafe(no_mangle)]
@@ -1325,8 +1331,8 @@ pub unsafe extern "C" fn prctl(op: c_int, a: c_ulong, b: c_ulong, c: c_ulong, d:
 
 // ---- mount tables ----
 
-/// A `FILE` for reading lines, enough for the `*mntent` functions: other
-/// stdio functions are not provided.
+/// A `FILE` for reading lines, enough for the `*mntent` functions, or for
+/// the unbuffered writes of `stdio`.
 pub struct FILE {
     fd: c_int,
     pos: usize,
@@ -1374,7 +1380,9 @@ pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fclose(f: *mut FILE) -> c_int {
     let r = sys::close(unsafe { (*f).fd });
-    let _ = unsafe { sys::munmap(f as usize, FILE_PAGES) };
+    if !stdio::is_standard(f) {
+        let _ = unsafe { sys::munmap(f as usize, FILE_PAGES) };
+    }
     ret_int(r)
 }
 
@@ -1839,3 +1847,540 @@ pub unsafe extern "C" fn gmtime(t: *const i64) -> *mut tm {
 pub unsafe extern "C" fn localtime(t: *const i64) -> *mut tm {
     unsafe { localtime_r(t, &raw mut TM) }
 }
+
+// ---- files and directories ----
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mkdir(path: *const c_char, mode: c_uint) -> c_int {
+    ret_int(unsafe { sys::mkdirat(AT_FDCWD, path.cast(), mode) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
+    ret_int(unsafe { sys::unlinkat(AT_FDCWD, path.cast(), sys::AT_REMOVEDIR) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
+    ret_int(unsafe { sys::unlinkat(AT_FDCWD, path.cast(), 0) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn link(old: *const c_char, new: *const c_char) -> c_int {
+    ret_int(unsafe { sys::linkat(AT_FDCWD, old.cast(), AT_FDCWD, new.cast(), 0) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rename(old: *const c_char, new: *const c_char) -> c_int {
+    ret_int(unsafe { sys::renameat2(AT_FDCWD, old.cast(), AT_FDCWD, new.cast(), 0) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chmod(path: *const c_char, mode: c_uint) -> c_int {
+    ret_int(unsafe { sys::fchmodat(AT_FDCWD, path.cast(), mode) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn readlink(path: *const c_char, buf: *mut c_char, len: size_t) -> ssize_t {
+    ret(unsafe { sys::readlinkat(AT_FDCWD, path.cast(), buf.cast(), len) })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fsync(fd: c_int) -> c_int {
+    ret_int(sys::fsync(fd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mkfifo(path: *const c_char, mode: c_uint) -> c_int {
+    ret_int(unsafe { sys::mknodat(AT_FDCWD, path.cast(), mode | sys::S_IFIFO, 0) })
+}
+
+#[repr(C)]
+pub struct timeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn utimes(path: *const c_char, tv: *const [timeval; 2]) -> c_int {
+    let ts = (!tv.is_null()).then(|| unsafe { (*tv).each_ref().map(|t| sys::Timespec { sec: t.tv_sec, nsec: t.tv_usec * 1000 }) });
+    let p = ts.as_ref().map_or(core::ptr::null(), |t| t.as_ptr());
+    ret_int(unsafe { sys::utimensat(AT_FDCWD, path.cast(), p, 0) })
+}
+
+/// The path the kernel has for an open file descriptor.
+fn fd_path(fd: c_int, buf: &mut [u8]) -> SysResult<usize> {
+    let mut proc = *b"/proc/self/fd/\0\0\0\0\0\0\0\0\0\0\0\0";
+    let mut n = 14;
+    let mut digits = [0u8; 11];
+    let mut i = digits.len();
+    let mut v = fd as u32;
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    for &d in &digits[i..] {
+        proc[n] = d;
+        n += 1;
+    }
+    let len = unsafe { sys::readlinkat(AT_FDCWD, proc.as_ptr(), buf.as_mut_ptr(), buf.len())? };
+    if len == buf.len() {
+        return Err(sys::ERANGE);
+    }
+    Ok(len)
+}
+
+const PATH_MAX: usize = 4096;
+
+/// As musl's: the path the kernel gives the file once it is opened.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char {
+    let fd = match unsafe { sys::openat(AT_FDCWD, path.cast(), sys::O_PATH | sys::O_CLOEXEC, 0) } {
+        Ok(fd) => fd,
+        Err(e) => {
+            set_errno(e);
+            return core::ptr::null_mut();
+        }
+    };
+    let mut buf = [0u8; PATH_MAX];
+    let r = fd_path(fd, &mut buf[..PATH_MAX - 1]);
+    let _ = sys::close(fd);
+    let len = match r {
+        Ok(n) => n,
+        Err(e) => {
+            set_errno(if e == sys::ERANGE { sys::ENAMETOOLONG } else { e });
+            return core::ptr::null_mut();
+        }
+    };
+    let out = if resolved.is_null() { unsafe { malloc(len + 1) }.cast::<u8>() } else { resolved.cast() };
+    if out.is_null() {
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), out, len);
+        *out.add(len) = 0;
+    }
+    out.cast()
+}
+
+/// A directory stream: `readdir` returns the `getdents64` records in
+/// `buf`, which are laid out as `struct dirent`.
+pub struct DIR {
+    fd: c_int,
+    pos: usize,
+    len: usize,
+    buf: [u8; 32768],
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdopendir(fd: c_int) -> *mut DIR {
+    let d = unsafe { malloc(size_of::<DIR>()) }.cast::<DIR>();
+    if !d.is_null() {
+        unsafe {
+            (*d).fd = fd;
+            (*d).pos = 0;
+            (*d).len = 0;
+        }
+    }
+    d
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut DIR {
+    let flags = sys::O_RDONLY | sys::O_DIRECTORY | sys::O_CLOEXEC;
+    let fd = match unsafe { sys::openat(AT_FDCWD, path.cast(), flags, 0) } {
+        Ok(fd) => fd,
+        Err(e) => {
+            set_errno(e);
+            return core::ptr::null_mut();
+        }
+    };
+    let d = unsafe { fdopendir(fd) };
+    if d.is_null() {
+        let _ = sys::close(fd);
+    }
+    d
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn readdir(d: *mut DIR) -> *mut c_void {
+    let d = unsafe { &mut *d };
+    if d.pos >= d.len {
+        match unsafe { sys::getdents64(d.fd, d.buf.as_mut_ptr(), d.buf.len()) } {
+            Ok(0) => return core::ptr::null_mut(),
+            Ok(n) => (d.pos, d.len) = (0, n),
+            Err(e) => {
+                set_errno(e);
+                return core::ptr::null_mut();
+            }
+        }
+    }
+    let rec = d.buf[d.pos..].as_mut_ptr();
+    // d_reclen, after d_ino and d_off
+    d.pos += u16::from_ne_bytes([d.buf[d.pos + 16], d.buf[d.pos + 17]]) as usize;
+    rec.cast()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn closedir(d: *mut DIR) -> c_int {
+    let r = sys::close(unsafe { (*d).fd });
+    unsafe { free(d.cast()) };
+    ret_int(r)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dirfd(d: *mut DIR) -> c_int {
+    unsafe { (*d).fd }
+}
+
+unsafe fn xattr(n: usize, path: *const c_char, name: *const c_char, v: *mut c_void, len: size_t) -> ssize_t {
+    ret(unsafe { sys::syscall(n, [path as usize, name as usize, v as usize, len, 0, 0]) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getxattr(path: *const c_char, name: *const c_char, v: *mut c_void, len: size_t) -> ssize_t {
+    unsafe { xattr(nr::GETXATTR, path, name, v, len) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lgetxattr(path: *const c_char, name: *const c_char, v: *mut c_void, len: size_t) -> ssize_t {
+    unsafe { xattr(nr::LGETXATTR, path, name, v, len) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn listxattr(path: *const c_char, list: *mut c_char, len: size_t) -> ssize_t {
+    ret(unsafe { sys::syscall(nr::LISTXATTR, [path as usize, list as usize, len, 0, 0, 0]) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn llistxattr(path: *const c_char, list: *mut c_char, len: size_t) -> ssize_t {
+    ret(unsafe { sys::syscall(nr::LLISTXATTR, [path as usize, list as usize, len, 0, 0, 0]) })
+}
+
+// ---- sessions and terminals ----
+
+#[unsafe(no_mangle)]
+pub extern "C" fn getsid(pid: pid_t) -> pid_t {
+    ret_int(unsafe { sys::syscall(nr::GETSID, [pid as usize, 0, 0, 0, 0, 0]) })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn getpgid(pid: pid_t) -> pid_t {
+    ret_int(sys::getpgid(pid))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn setsid() -> pid_t {
+    ret_int(sys::setsid())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn killpg(pgrp: pid_t, sig: c_int) -> c_int {
+    if pgrp < 0 {
+        return ret_int(Err(sys::EINVAL));
+    }
+    ret_int(sys::kill(-pgrp, sig as usize))
+}
+
+const TIOCGPGRP: usize = 0x540f;
+const TIOCSWINSZ: usize = 0x5414;
+const TIOCGPTN: usize = 0x8004_5430;
+const TIOCSPTLCK: usize = 0x4004_5431;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tcgetpgrp(fd: c_int) -> pid_t {
+    let mut pgrp: pid_t = 0;
+    match unsafe { sys::ioctl(fd, TIOCGPGRP, (&raw mut pgrp) as usize) } {
+        Ok(_) => pgrp,
+        Err(e) => ret_int(Err(e)),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ttyname_r(fd: c_int, buf: *mut c_char, len: size_t) -> c_int {
+    if isatty(fd) == 0 {
+        return unsafe { *errno::location() };
+    }
+    if len == 0 {
+        return sys::ERANGE;
+    }
+    let out = unsafe { core::slice::from_raw_parts_mut(buf.cast::<u8>(), len) };
+    match fd_path(fd, &mut out[..len - 1]) {
+        Ok(n) => {
+            out[n] = 0;
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// The kernel's (and musl's) `struct termios`.
+#[repr(C)]
+pub struct termios {
+    c_iflag: u32,
+    c_oflag: u32,
+    c_cflag: u32,
+    c_lflag: u32,
+    c_line: u8,
+    c_cc: [u8; 32],
+    c_ispeed: u32,
+    c_ospeed: u32,
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cfmakeraw(t: *mut termios) {
+    let t = unsafe { &mut *t };
+    // IGNBRK BRKINT PARMRK ISTRIP INLCR IGNCR ICRNL IXON
+    t.c_iflag &= !(0x1 | 0x2 | 0x8 | 0x20 | 0x40 | 0x80 | 0x100 | 0x400);
+    // OPOST
+    t.c_oflag &= !0x1;
+    // ECHO ECHONL ICANON ISIG IEXTEN
+    t.c_lflag &= !(0x8 | 0x40 | 0x2 | 0x1 | 0x8000);
+    // CSIZE PARENB, then CS8
+    t.c_cflag = (t.c_cflag & !(0x30 | 0x100)) | 0x30;
+    // VMIN, VTIME
+    t.c_cc[6] = 1;
+    t.c_cc[5] = 0;
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openpty(
+    master: *mut c_int,
+    slave: *mut c_int,
+    name: *mut c_char,
+    t: *const termios,
+    ws: *const c_void,
+) -> c_int {
+    let rw = sys::O_RDWR | sys::O_NOCTTY;
+    let m = match unsafe { sys::openat(AT_FDCWD, c"/dev/ptmx".as_ptr().cast(), rw | sys::O_CLOEXEC, 0) } {
+        Ok(fd) => fd,
+        Err(e) => return ret_int(Err(e)),
+    };
+    let fail = |e| {
+        let _ = sys::close(m);
+        ret_int(Err(e))
+    };
+    let (mut unlock, mut n) = (0 as c_int, 0 as c_uint);
+    if let Err(e) = unsafe { sys::ioctl(m, TIOCSPTLCK, (&raw mut unlock) as usize) } {
+        return fail(e);
+    }
+    if let Err(e) = unsafe { sys::ioctl(m, TIOCGPTN, (&raw mut n) as usize) } {
+        return fail(e);
+    }
+    let mut path = [0u8; 32];
+    let mut b = Buf { p: path.as_mut_ptr(), left: path.len() };
+    let mut digits = [0u8; 10];
+    let mut i = digits.len();
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let _ = b.take(9).map(|p| unsafe { core::ptr::copy_nonoverlapping(b"/dev/pts/".as_ptr(), p, 9) });
+    let _ = b.str(&digits[i..]);
+    let s = match unsafe { sys::openat(AT_FDCWD, path.as_ptr(), rw, 0) } {
+        Ok(fd) => fd,
+        Err(e) => return fail(e),
+    };
+    unsafe {
+        if !t.is_null() {
+            let _ = sys::ioctl(s, TCGETS + 1, t as usize);
+        }
+        if !ws.is_null() {
+            let _ = sys::ioctl(s, TIOCSWINSZ, ws as usize);
+        }
+        if !name.is_null() {
+            strcpy(name, path.as_ptr().cast());
+        }
+        *master = m;
+        *slave = s;
+    }
+    0
+}
+
+// ---- time ----
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn time(t: *mut i64) -> i64 {
+    let now = sys::clock_gettime(sys::CLOCK_REALTIME).sec;
+    if !t.is_null() {
+        unsafe { *t = now };
+    }
+    now
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gettimeofday(tv: *mut timeval, _tz: *mut c_void) -> c_int {
+    if !tv.is_null() {
+        let now = sys::clock_gettime(sys::CLOCK_REALTIME);
+        unsafe { tv.write(timeval { tv_sec: now.sec, tv_usec: now.nsec / 1000 }) };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn sleep(secs: c_uint) -> c_uint {
+    let _ = sys::nanosleep(&sys::Timespec { sec: secs as i64, nsec: 0 });
+    0
+}
+
+/// On `pselect6`; the timeout is updated with the time left, as Linux's
+/// `select` does.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn select(n: c_int, r: *mut c_void, w: *mut c_void, e: *mut c_void, tv: *mut timeval) -> c_int {
+    let mut ts = (!tv.is_null()).then(|| unsafe { sys::Timespec { sec: (*tv).tv_sec, nsec: (*tv).tv_usec * 1000 } });
+    let tsp = ts.as_mut().map_or(core::ptr::null_mut(), |t| t as *mut sys::Timespec);
+    let res = unsafe { sys::syscall(nr::PSELECT6, [n as usize, r as usize, w as usize, e as usize, tsp as usize, 0]) };
+    if let Some(t) = ts {
+        unsafe { tv.write(timeval { tv_sec: t.sec, tv_usec: t.nsec / 1000 }) };
+    }
+    ret_int(res)
+}
+
+// ---- groups ----
+
+/// The groups `user` is a member of in /etc/group, with `group` first.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrouplist(user: *const c_char, group: gid_t, groups: *mut gid_t, ngroups: *mut c_int) -> c_int {
+    let user = unsafe { CStr::from_ptr(user) }.to_bytes();
+    let max = unsafe { *ngroups }.max(0) as usize;
+    let mut n = 0;
+    let mut add = |g: gid_t| {
+        let have = unsafe { core::slice::from_raw_parts(groups, n.min(max)) };
+        if !have.contains(&g) {
+            if n < max {
+                unsafe { *groups.add(n) = g };
+            }
+            n += 1;
+        }
+    };
+    add(group);
+    let _ = with_file(c"/etc/group", |f| {
+        for line in f.split(|&b| b == b'\n') {
+            let mut fields = line.split(|&b| b == b':');
+            let (Some(_), Some(_), Some(gid), Some(members)) = (fields.next(), fields.next(), fields.next(), fields.next()) else {
+                continue;
+            };
+            if members.split(|&b| b == b',').any(|m| m == user) {
+                if let Some(g) = parse_id(gid) {
+                    add(g);
+                }
+            }
+        }
+    });
+    unsafe { *ngroups = n as c_int };
+    if n > max { -1 } else { n as c_int }
+}
+
+// ---- the C locale ----
+
+/// The one locale: every `newlocale` is the C locale, with UTF-8 text.
+static C_LOCALE: u8 = 0;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn newlocale(_mask: c_int, _name: *const c_char, _base: *mut c_void) -> *mut c_void {
+    (&raw const C_LOCALE).cast_mut().cast()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn freelocale(_l: *mut c_void) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn uselocale(_l: *mut c_void) -> *mut c_void {
+    newlocale(0, core::ptr::null(), core::ptr::null_mut())
+}
+
+/// The C locale's `nl_langinfo` items, as glibc and musl number them.
+#[unsafe(no_mangle)]
+pub extern "C" fn nl_langinfo(item: c_int) -> *mut c_char {
+    const DAYS: [&CStr; 7] = [c"Sunday", c"Monday", c"Tuesday", c"Wednesday", c"Thursday", c"Friday", c"Saturday"];
+    const ABDAYS: [&CStr; 7] = [c"Sun", c"Mon", c"Tue", c"Wed", c"Thu", c"Fri", c"Sat"];
+    const MONTHS: [&CStr; 12] = [
+        c"January", c"February", c"March", c"April", c"May", c"June", c"July", c"August", c"September", c"October",
+        c"November", c"December",
+    ];
+    const ABMONTHS: [&CStr; 12] =
+        [c"Jan", c"Feb", c"Mar", c"Apr", c"May", c"Jun", c"Jul", c"Aug", c"Sep", c"Oct", c"Nov", c"Dec"];
+    let s: &CStr = match item {
+        14 => c"UTF-8",
+        0x10000 => c".",
+        0x20000..=0x20006 => ABDAYS[(item - 0x20000) as usize],
+        0x20007..=0x2000d => DAYS[(item - 0x20007) as usize],
+        0x2000e..=0x20019 => ABMONTHS[(item - 0x2000e) as usize],
+        0x2001a..=0x20025 => MONTHS[(item - 0x2001a) as usize],
+        0x20026 => c"AM",
+        0x20027 => c"PM",
+        0x20028 => c"%a %b %e %H:%M:%S %Y",
+        0x20029 => c"%m/%d/%y",
+        0x2002a => c"%H:%M:%S",
+        0x2002b => c"%I:%M:%S %p",
+        0x50000 => c"^[yY]",
+        0x50001 => c"^[nN]",
+        _ => c"",
+    };
+    s.as_ptr().cast_mut()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nl_langinfo_l(item: c_int, _l: *mut c_void) -> *mut c_char {
+    nl_langinfo(item)
+}
+
+/// iconv between UTF-8 and itself (the C locale's codeset here): a copy.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iconv_open(to: *const c_char, from: *const c_char) -> *mut c_void {
+    let utf8 = |s: *const c_char| {
+        let s = unsafe { CStr::from_ptr(s) }.to_bytes();
+        let s = s.split(|&b| b == b'/').next().unwrap_or(s);
+        s.eq_ignore_ascii_case(b"UTF-8") || s.eq_ignore_ascii_case(b"UTF8")
+    };
+    if utf8(to) && utf8(from) {
+        return core::ptr::without_provenance_mut(1);
+    }
+    set_errno(sys::EINVAL);
+    core::ptr::without_provenance_mut(usize::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iconv(
+    _cd: *mut c_void,
+    inbuf: *mut *mut c_char,
+    inleft: *mut size_t,
+    outbuf: *mut *mut c_char,
+    outleft: *mut size_t,
+) -> size_t {
+    if inbuf.is_null() || unsafe { (*inbuf).is_null() } {
+        return 0;
+    }
+    unsafe {
+        let n = (*inleft).min(*outleft);
+        core::ptr::copy_nonoverlapping(*inbuf, *outbuf, n);
+        *inbuf = (*inbuf).add(n);
+        *outbuf = (*outbuf).add(n);
+        *inleft -= n;
+        *outleft -= n;
+        if *inleft > 0 {
+            set_errno(sys::E2BIG);
+            return usize::MAX;
+        }
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn iconv_close(_cd: *mut c_void) -> c_int {
+    0
+}
+
+// ---- the environment, for C code that reads `environ` ----
+
+/// The initial environment, set at startup.
+#[unsafe(no_mangle)]
+pub static mut environ: *mut *mut c_char = core::ptr::null_mut();

@@ -121,6 +121,12 @@ pub mod nr {
     pub const NEWFSTATAT: usize = 262;
     pub const UMASK: usize = 95;
     pub const GETRUSAGE: usize = 98;
+    pub const GETSID: usize = 124;
+    pub const PSELECT6: usize = 270;
+    pub const GETXATTR: usize = 191;
+    pub const LGETXATTR: usize = 192;
+    pub const LISTXATTR: usize = 194;
+    pub const LLISTXATTR: usize = 195;
 }
 
 /// # Safety

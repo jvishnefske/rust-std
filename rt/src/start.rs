@@ -53,6 +53,10 @@ pub unsafe fn init(sp: *const usize) {
         ARGV.store(argv, Ordering::Relaxed);
         let envp = argv.add(argc + 1);
         ENVP.store(envp, Ordering::Relaxed);
+        #[cfg(linux_none)]
+        {
+            crate::clib::environ = envp.cast();
+        }
         let mut p = envp;
         while !(*p).is_null() {
             p = p.add(1);

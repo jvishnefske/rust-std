@@ -12,8 +12,8 @@
 //! find its own guard page ([`current_guard`]), even in a signal handler.
 
 use core::mem::size_of;
-use core::sync::atomic::AtomicU32;
-use core::sync::atomic::Ordering::{AcqRel, Acquire};
+use core::sync::atomic::{AtomicU32, AtomicUsize};
+use core::sync::atomic::Ordering::{AcqRel, Acquire, Release};
 
 use crate::sys::{self, PAGE_SIZE};
 use crate::{arch, futex, signal, tls};
@@ -31,8 +31,9 @@ struct Control {
     state: AtomicU32,
     map_base: usize,
     map_len: usize,
-    /// the stack's guard page
+    /// the stack's guard page, and the top of the stack above it
     guard: usize,
+    stack_top: usize,
     /// alternate signal stack size (0: none), at `map_base + PAGE_SIZE`
     altstack: usize,
     entry: unsafe fn(*mut u8),
@@ -91,6 +92,7 @@ pub unsafe fn spawn(stack_size: usize, entry: unsafe fn(*mut u8), arg: *mut u8) 
             map_base: base,
             map_len,
             guard,
+            stack_top: top,
             altstack,
             entry,
             arg,
@@ -132,6 +134,10 @@ extern "C" fn thread_start(arg: *mut u8) -> ! {
             let _ = signal::set_altstack((*ctl).map_base + PAGE_SIZE, (*ctl).altstack);
         }
         ((*ctl).entry)((*ctl).arg);
+        let hook = EXIT_HOOK.load(Acquire);
+        if hook != 0 {
+            core::mem::transmute::<usize, fn()>(hook)();
+        }
         if (*ctl).altstack > 0 {
             signal::disable_altstack();
         }
@@ -146,6 +152,25 @@ extern "C" fn thread_start(arg: *mut u8) -> ! {
         }
         sys::exit_thread(0)
     }
+}
+
+/// Run on each spawned thread as it finishes (not on the main thread): the
+/// C library's `pthread_key_create` destructors.
+static EXIT_HOOK: AtomicUsize = AtomicUsize::new(0);
+
+pub fn set_exit_hook(f: fn()) {
+    EXIT_HOOK.store(f as usize, Release);
+}
+
+/// The calling thread's stack, as `(lowest, top)`; None on the main thread.
+#[cfg(linux_none)]
+pub fn current_stack() -> Option<(usize, usize)> {
+    let ctl = tls::thread_word() as *const Control;
+    if ctl.is_null() {
+        return None;
+    }
+    let ctl = unsafe { &*ctl };
+    Some((ctl.guard + PAGE_SIZE, ctl.stack_top))
 }
 
 /// The calling thread's stack guard page, as `(start, end)`; None on the

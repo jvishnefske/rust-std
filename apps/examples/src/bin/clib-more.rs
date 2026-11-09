@@ -68,6 +68,16 @@ unsafe extern "C" {
     fn iconv_open(to: *const c_char, from: *const c_char) -> isize;
     fn iconv(cd: isize, inb: *mut *mut c_char, inl: *mut usize, outb: *mut *mut c_char, outl: *mut usize) -> usize;
     fn __popcountdi2(x: i64) -> c_int;
+    fn __isoc23_sscanf(s: *const c_char, fmt: *const c_char, ...) -> c_int;
+    fn pthread_once(once: *mut c_int, init: extern "C" fn()) -> c_int;
+    fn getauxval(key: u64) -> u64;
+    fn nanosleep(req: *const [i64; 2], rem: *mut [i64; 2]) -> c_int;
+    fn perror(s: *const c_char);
+}
+
+static ONCE_RAN: AtomicUsize = AtomicUsize::new(0);
+extern "C" fn once_init() {
+    ONCE_RAN.fetch_add(1, Ordering::SeqCst);
 }
 
 #[repr(C)]
@@ -320,5 +330,36 @@ fn main() {
             p = p.add(1);
         }
         println!("environ {count} popcount {}", __popcountdi2(-1));
+
+        let (mut a, mut b, mut word, mut ch, mut n) = (0u64, 0u32, [0u8; 8], 0u8, 0 as c_int);
+        let got = __isoc23_sscanf(
+            c"  0x1f:42 word! x".as_ptr(),
+            c"%llx:%u %5s %c%n".as_ptr(),
+            &mut a,
+            &mut b,
+            word.as_mut_ptr(),
+            &mut ch,
+            &mut n,
+        );
+        let first = b;
+        let none = __isoc23_sscanf(c"".as_ptr(), c"%d".as_ptr(), &mut b);
+        let mut b2 = 0u32;
+        let stop = __isoc23_sscanf(c"7 x".as_ptr(), c"%u %u".as_ptr(), &mut b, &mut b2);
+        println!("sscanf {got} {a} {first} {} {} n {n} none {none} stop {stop} {b}", s(word.as_ptr().cast()), ch as char);
+
+        let mut once = 0 as c_int;
+        let once_ptr = &raw mut once as usize;
+        let ts: Vec<_> = (0..4).map(|_| std::thread::spawn(move || pthread_once(once_ptr as *mut c_int, once_init))).collect();
+        let rs: Vec<_> = ts.into_iter().map(|t| t.join().unwrap()).collect();
+        println!("pthread_once ran {} {rs:?} again {}", ONCE_RAN.load(Ordering::SeqCst), {
+            pthread_once(&mut once, once_init);
+            ONCE_RAN.load(Ordering::SeqCst)
+        });
+        // AT_PAGESZ
+        let t0 = std::time::Instant::now();
+        let slept = nanosleep(&[0, 20_000_000], std::ptr::null_mut());
+        println!("getauxval {} {} nanosleep {slept} {}", getauxval(6), getauxval(12345), t0.elapsed().as_millis() >= 20);
+        *__errno_location() = 2;
+        perror(c"perror".as_ptr());
     }
 }

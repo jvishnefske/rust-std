@@ -2384,3 +2384,9 @@ pub extern "C" fn iconv_close(_cd: *mut c_void) -> c_int {
 /// The initial environment, set at startup.
 #[unsafe(no_mangle)]
 pub static mut environ: *mut *mut c_char = core::ptr::null_mut();
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nanosleep(req: *const sys::Timespec, rem: *mut sys::Timespec) -> c_int {
+    // CLOCK_REALTIME, relative; the time left in `rem` when interrupted
+    ret_int(unsafe { sys::clock_nanosleep(sys::CLOCK_REALTIME, 0, req, rem) })
+}

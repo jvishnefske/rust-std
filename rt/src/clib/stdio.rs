@@ -462,3 +462,178 @@ pub unsafe extern "C" fn fprintf(f: *mut FILE, fmt: *const c_char, ap: ...) -> c
 pub unsafe extern "C" fn printf(fmt: *const c_char, ap: ...) -> c_int {
     unsafe { vfprintf(stdout, fmt, ap) }
 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perror(s: *const c_char) {
+    let e = unsafe { *crate::errno::location() };
+    let mut out = Fd { fd: 2, buf: [0; 512], len: 0, n: 0, failed: false };
+    if !s.is_null() && unsafe { *s } != 0 {
+        out.put(unsafe { CStr::from_ptr(s) }.to_bytes());
+        out.put(b": ");
+    }
+    out.put(sys::strerror(e).as_bytes());
+    out.put(b"\n");
+    out.flush();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __assert_fail(expr: *const c_char, file: *const c_char, line: u32, func: *const c_char) -> ! {
+    let mut out = Fd { fd: 2, buf: [0; 512], len: 0, n: 0, failed: false };
+    let mut num = Text::new();
+    let _ = core::fmt::Write::write_fmt(&mut num, format_args!(":{line}: "));
+    for part in [unsafe { CStr::from_ptr(file) }.to_bytes(), num.as_bytes(), unsafe { CStr::from_ptr(func) }.to_bytes()] {
+        out.put(part);
+    }
+    out.put(b": Assertion `");
+    out.put(unsafe { CStr::from_ptr(expr) }.to_bytes());
+    out.put(b"' failed.\n");
+    out.flush();
+    crate::start::abort()
+}
+
+// ---- scanf ----
+
+/// `sscanf`'s integer, string and character conversions (no floats, no
+/// scansets): the number of conversions stored, or -1 if the input ended
+/// before the first.
+unsafe fn scan(input: *const c_char, fmt: *const c_char, mut ap: VaList) -> c_int {
+    let s = unsafe { CStr::from_ptr(input) }.to_bytes();
+    let fmt = unsafe { CStr::from_ptr(fmt) }.to_bytes();
+    let (mut i, mut f, mut stored) = (0, 0, 0);
+    let space = |c: u8| matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r');
+    while f < fmt.len() {
+        let c = fmt[f];
+        if space(c) {
+            while i < s.len() && space(s[i]) {
+                i += 1;
+            }
+            f += 1;
+            continue;
+        }
+        if c != b'%' || fmt.get(f + 1) == Some(&b'%') {
+            let c = if c == b'%' { f += 1; b'%' } else { c };
+            if s.get(i) != Some(&c) {
+                break;
+            }
+            i += 1;
+            f += 1;
+            continue;
+        }
+        f += 1;
+        let skip = fmt.get(f) == Some(&b'*');
+        if skip {
+            f += 1;
+        }
+        let mut width = 0;
+        while let Some(d) = fmt.get(f).filter(|d| d.is_ascii_digit()) {
+            width = width * 10 + (d - b'0') as usize;
+            f += 1;
+        }
+        // 0 = int, 1 = char, 2 = short, 8 = 64-bit
+        let mut len = 0;
+        while let Some(&m) = fmt.get(f) {
+            match m {
+                b'h' => len = if len == 2 { 1 } else { 2 },
+                b'l' | b'z' | b'j' | b't' | b'q' | b'L' => len = 8,
+                _ => break,
+            }
+            f += 1;
+        }
+        let Some(&conv) = fmt.get(f) else { break };
+        f += 1;
+        if conv != b'c' && conv != b'n' {
+            while i < s.len() && space(s[i]) {
+                i += 1;
+            }
+        }
+        if i >= s.len() && conv != b'n' {
+            return if stored == 0 { -1 } else { stored };
+        }
+        let max = if width == 0 { usize::MAX } else { width };
+        match conv {
+            b'd' | b'i' | b'u' | b'x' | b'X' | b'o' => {
+                let base = match conv {
+                    b'x' | b'X' => 16,
+                    b'o' => 8,
+                    b'i' => 0,
+                    _ => 10,
+                };
+                // the field, cut to its width, parsed as strtoull does
+                let mut field = [0u8; 72];
+                let n = (s.len() - i).min(max).min(field.len() - 1);
+                field[..n].copy_from_slice(&s[i..i + n]);
+                let mut end = core::ptr::null_mut();
+                let v = unsafe { super::string::strtoull(field.as_ptr().cast(), &mut end, base) };
+                let used = end as usize - field.as_ptr() as usize;
+                if used == 0 {
+                    break;
+                }
+                i += used;
+                if !skip {
+                    unsafe {
+                        match len {
+                            8 => *ap.next_arg::<*mut u64>() = v,
+                            1 => *ap.next_arg::<*mut u8>() = v as u8,
+                            2 => *ap.next_arg::<*mut u16>() = v as u16,
+                            _ => *ap.next_arg::<*mut u32>() = v as u32,
+                        }
+                    }
+                    stored += 1;
+                }
+            }
+            b's' => {
+                let start = i;
+                while i < s.len() && !space(s[i]) && i - start < max {
+                    i += 1;
+                }
+                if !skip {
+                    let p = unsafe { ap.next_arg::<*mut u8>() };
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(s[start..i].as_ptr(), p, i - start);
+                        *p.add(i - start) = 0;
+                    }
+                    stored += 1;
+                }
+            }
+            b'c' => {
+                let n = if width == 0 { 1 } else { width };
+                if s.len() - i < n {
+                    break;
+                }
+                if !skip {
+                    let p = unsafe { ap.next_arg::<*mut u8>() };
+                    unsafe { core::ptr::copy_nonoverlapping(s[i..].as_ptr(), p, n) };
+                    stored += 1;
+                }
+                i += n;
+            }
+            b'n' => {
+                if !skip {
+                    unsafe { *ap.next_arg::<*mut c_int>() = i as c_int };
+                }
+            }
+            _ => break,
+        }
+    }
+    stored
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vsscanf(s: *const c_char, fmt: *const c_char, ap: VaList) -> c_int {
+    unsafe { scan(s, fmt, ap) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sscanf(s: *const c_char, fmt: *const c_char, ap: ...) -> c_int {
+    unsafe { scan(s, fmt, ap) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __isoc23_sscanf(s: *const c_char, fmt: *const c_char, ap: ...) -> c_int {
+    unsafe { scan(s, fmt, ap) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __isoc99_sscanf(s: *const c_char, fmt: *const c_char, ap: ...) -> c_int {
+    unsafe { scan(s, fmt, ap) }
+}

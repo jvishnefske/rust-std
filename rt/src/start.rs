@@ -110,8 +110,9 @@ pub fn auxv(key: usize) -> Option<usize> {
     None
 }
 
-/// libc's `getauxval`, which compiler-builtins calls on aarch64.
-#[cfg(all(linux_none, target_arch = "aarch64", not(kani)))]
+/// libc's `getauxval`, which compiler-builtins calls on aarch64 (and C
+/// code in crates, such as aws-lc, everywhere).
+#[cfg(all(linux_none, not(kani)))]
 #[unsafe(no_mangle)]
 extern "C" fn getauxval(key: core::ffi::c_ulong) -> core::ffi::c_ulong {
     auxv(key as usize).unwrap_or(0) as core::ffi::c_ulong

@@ -269,3 +269,34 @@ pub(super) fn with_handlers(fork: impl FnOnce() -> isize) -> isize {
     }
     pid
 }
+
+// ---- once ----
+
+const ONCE_NEW: u32 = 0;
+const ONCE_RUNNING: u32 = 1;
+const ONCE_WAITED: u32 = 2;
+const ONCE_DONE: u32 = 3;
+
+/// musl's `pthread_once_t` is an int, 0 before the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_once(once: *mut AtomicU32, init: unsafe extern "C" fn()) -> c_int {
+    let once = unsafe { &*once };
+    loop {
+        match once.compare_exchange(ONCE_NEW, ONCE_RUNNING, Ordering::Acquire, Ordering::Acquire) {
+            Ok(_) => {
+                unsafe { init() };
+                if once.swap(ONCE_DONE, Ordering::Release) == ONCE_WAITED {
+                    crate::futex::wake_all(once);
+                }
+                return 0;
+            }
+            Err(ONCE_DONE) => return 0,
+            Err(s) => {
+                // running: say there is a waiter, then sleep until done
+                if s == ONCE_WAITED || once.compare_exchange(ONCE_RUNNING, ONCE_WAITED, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                    crate::futex::wait(once, ONCE_WAITED, None);
+                }
+            }
+        }
+    }
+}

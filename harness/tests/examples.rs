@@ -28,7 +28,7 @@ const EXAMPLES: &[&str] = &[
     "backtrace",
     "unwind",
     "clib",
-    "clib_more",
+    "clib-more",
 ];
 
 struct Env {
@@ -248,7 +248,7 @@ fn passwd_entry() -> Option<Vec<String>> {
 }
 
 fn check_clib_more(e: &Env) {
-    let r = e.run("clib_more", &[], b"", &[("CLIB_MORE", "1")]);
+    let r = e.run("clib-more", &[], b"", &[("CLIB_MORE", "1")]);
     assert_eq!(r.code(), Some(0), "{}", r.stderr());
     let out = r.stdout();
     for line in [
@@ -272,9 +272,13 @@ fn check_clib_more(e: &Env) {
         "langinfo UTF-8 Wednesday Dec %a %b %e %H:%M:%S %Y\n",
         "iconv open true copy true left 1 2big true other true\n",
         "environ 1 popcount 64\n",
+        "sscanf 4 31 42 word! x n 17 none -1 stop 1 7\n",
+        "pthread_once ran 1 [0, 0, 0, 0] again 1\n",
+        "getauxval 4096 0 nanosleep 0 true\n",
     ] {
         has(&out, line);
     }
+    has(&r.stderr(), "perror: No such file or directory\n");
     // a pseudo-terminal, where the system has them
     if std::path::Path::new("/dev/ptmx").exists() && !out.contains("openpty none") {
         has(&out, "openpty true ttyname_r 0 same true\n");

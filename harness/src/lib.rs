@@ -218,8 +218,15 @@ pub fn apps_cargo_with(arch: Arch, panic: Panic, args: &[&str]) -> Command {
         "target.{}.rustflags=[{panic_flag}\"--cfg=linux_none_src=\\\"{stamp}\\\"\", \"--check-cfg=cfg(linux_none_src, values(any()))\"]",
         arch.name()
     ));
-    if let Some(Some(r)) = arch.runner() {
-        cmd.arg("--config").arg(format!("target.{}.runner=[\"{}\"]", arch.name(), r.display()));
+    // natively, replace apps/'s qemu runner with `env`, which just runs the
+    // program (cargo rejects an empty runner)
+    let runner = match arch.runner() {
+        Some(Some(r)) => Some(r.display().to_string()),
+        Some(None) => Some("env".to_string()),
+        None => None,
+    };
+    if let Some(r) = runner {
+        cmd.arg("--config").arg(format!("target.{}.runner=[\"{r}\"]", arch.name()));
     }
     cmd
 }

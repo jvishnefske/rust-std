@@ -128,6 +128,8 @@ pub mod nr {
     pub const LISTXATTR: usize = 11;
     pub const LLISTXATTR: usize = 12;
     pub const SCHED_SETAFFINITY: usize = 122;
+    pub const RECVMMSG: usize = 243;
+    pub const SENDMMSG: usize = 269;
 }
 
 /// # Safety

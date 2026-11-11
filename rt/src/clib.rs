@@ -459,6 +459,15 @@ pub unsafe extern "C" fn poll(fds: *mut c_void, n: c_ulong, timeout_ms: c_int) -
     ret_int(unsafe { sys::ppoll(fds.cast(), n as usize, tsp) })
 }
 
+/// On a copy of the timeout: the kernel writes the time left into it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ppoll(fds: *mut c_void, n: c_ulong, timeout: *const sys::Timespec, sigmask: *const c_void) -> c_int {
+    let mut ts = (!timeout.is_null()).then(|| unsafe { timeout.read() });
+    let tsp = ts.as_mut().map_or(core::ptr::null_mut(), |t| t as *mut sys::Timespec);
+    // the kernel's sigset_t is 8 bytes
+    ret_int(unsafe { sys::syscall(nr::PPOLL, [fds as usize, n as usize, tsp as usize, sigmask as usize, 8, 0]) })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn epoll_create1(flags: c_int) -> c_int {
     ret_int(unsafe { sys::syscall(nr::EPOLL_CREATE1, [flags as usize, 0, 0, 0, 0, 0]) })
@@ -1199,6 +1208,7 @@ pub extern "C" fn inotify_rm_watch(fd: c_int, wd: c_int) -> c_int {
 
 const TCSETS: usize = 0x5402;
 const TCFLSH: usize = 0x540B;
+const TCSBRK: usize = 0x5409;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcgetattr(fd: c_int, termios: *mut c_void) -> c_int {
@@ -1218,6 +1228,13 @@ pub unsafe extern "C" fn tcsetattr(fd: c_int, optional_actions: c_int, termios: 
 #[unsafe(no_mangle)]
 pub extern "C" fn tcflush(fd: c_int, queue: c_int) -> c_int {
     ret_int(unsafe { sys::ioctl(fd, TCFLSH, queue as usize) })
+}
+
+/// Waits until the output is sent: `TCSBRK` with a nonzero argument sends
+/// no break, only drains.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcdrain(fd: c_int) -> c_int {
+    ret_int(unsafe { sys::ioctl(fd, TCSBRK, 1) })
 }
 
 // ---- more sockets ----
@@ -1272,6 +1289,48 @@ pub unsafe extern "C" fn sendmsg(fd: c_int, msg: *const c_void, flags: c_int) ->
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn recvmsg(fd: c_int, msg: *mut c_void, flags: c_int) -> ssize_t {
     ret(unsafe { sys::recvmsg(fd, msg.cast(), flags as u32) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sendmmsg(fd: c_int, msgs: *mut c_void, n: c_uint, flags: c_int) -> c_int {
+    ret_int(unsafe { sys::syscall(nr::SENDMMSG, [fd as usize, msgs as usize, n as usize, flags as usize, 0, 0]) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn recvmmsg(fd: c_int, msgs: *mut c_void, n: c_uint, flags: c_int, timeout: *mut sys::Timespec) -> c_int {
+    let args = [fd as usize, msgs as usize, n as usize, flags as usize, timeout as usize, 0];
+    ret_int(unsafe { sys::syscall(nr::RECVMMSG, args) })
+}
+
+/// The index of the network interface `name`, by `SIOCGIFINDEX` on a
+/// socket; 0 (with `errno` set) if there is none.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn if_nametoindex(name: *const c_char) -> c_uint {
+    const SIOCGIFINDEX: usize = 0x8933;
+    // struct ifreq: the name, then a union (the index first)
+    let mut ifr = [0u8; 40];
+    let name = unsafe { core::ffi::CStr::from_ptr(name) }.to_bytes();
+    if name.len() >= 16 {
+        set_errno(sys::ENODEV);
+        return 0;
+    }
+    ifr[..name.len()].copy_from_slice(name);
+    let fd = match sys::socket(sys::AF_INET, sys::SOCK_DGRAM | sys::SOCK_CLOEXEC, 0) {
+        Ok(fd) => fd,
+        Err(e) => {
+            set_errno(e);
+            return 0;
+        }
+    };
+    let r = unsafe { sys::ioctl(fd, SIOCGIFINDEX, ifr.as_mut_ptr() as usize) };
+    let _ = sys::close(fd);
+    match r {
+        Ok(_) => i32::from_ne_bytes(ifr[16..20].try_into().unwrap()) as c_uint,
+        Err(e) => {
+            set_errno(e);
+            0
+        }
+    }
 }
 
 // ---- more signals, time and resources ----
@@ -1893,6 +1952,11 @@ pub unsafe extern "C" fn readlink(path: *const c_char, buf: *mut c_char, len: si
 #[unsafe(no_mangle)]
 pub extern "C" fn fsync(fd: c_int) -> c_int {
     ret_int(sys::fsync(fd))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn flock(fd: c_int, op: c_int) -> c_int {
+    ret_int(sys::flock(fd, op as u32))
 }
 
 #[unsafe(no_mangle)]

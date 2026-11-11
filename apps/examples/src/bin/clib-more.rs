@@ -75,6 +75,12 @@ unsafe extern "C" {
     fn perror(s: *const c_char);
     fn sched_getaffinity(pid: c_int, size: usize, set: *mut u64) -> c_int;
     fn sched_setaffinity(pid: c_int, size: usize, set: *const u64) -> c_int;
+    fn flock(fd: c_int, op: c_int) -> c_int;
+    fn ppoll(fds: *mut [c_int; 2], n: u64, timeout: *const [i64; 2], sigmask: *const u64) -> c_int;
+    fn tcdrain(fd: c_int) -> c_int;
+    fn if_nametoindex(name: *const c_char) -> u32;
+    fn sendmmsg(fd: c_int, msgs: *mut MMsgHdr, n: u32, flags: c_int) -> c_int;
+    fn recvmmsg(fd: c_int, msgs: *mut MMsgHdr, n: u32, flags: c_int, timeout: *mut [i64; 2]) -> c_int;
 }
 
 static ONCE_RAN: AtomicUsize = AtomicUsize::new(0);
@@ -89,6 +95,28 @@ struct Dirent {
     reclen: u16,
     kind: u8,
     name: [c_char; 256],
+}
+
+/// `struct mmsghdr`: a `struct msghdr` and the length sent or received.
+#[repr(C)]
+struct MMsgHdr {
+    name: *mut c_void,
+    name_len: u32,
+    iov: *mut [usize; 2],
+    iov_len: usize,
+    control: *mut c_void,
+    control_len: usize,
+    flags: c_int,
+    // struct msghdr is padded to 56 bytes
+    _pad: u32,
+    len: u32,
+}
+
+impl MMsgHdr {
+    fn new(iov: &mut [usize; 2]) -> MMsgHdr {
+        let null = std::ptr::null_mut();
+        MMsgHdr { name: null, name_len: 0, iov, iov_len: 1, control: null, control_len: 0, flags: 0, _pad: 0, len: 0 }
+    }
 }
 
 fn s(p: *const c_char) -> String {
@@ -273,6 +301,7 @@ fn main() {
                 let mut tty = [0 as c_char; 64];
                 let r = ttyname_r(sl, tty.as_mut_ptr(), tty.len());
                 println!("openpty {} ttyname_r {r} same {}", s(name.as_ptr()).starts_with("/dev/pts/"), s(tty.as_ptr()) == s(name.as_ptr()));
+                println!("tcdrain {}", tcdrain(sl));
                 close(m);
                 close(sl);
             }
@@ -364,6 +393,44 @@ fn main() {
         let mut set = [0u64; 16];
         sched_getaffinity(0, 128, set.as_mut_ptr());
         println!("sched_setaffinity {}", sched_setaffinity(0, 128, set.as_ptr()));
+
+        // LOCK_SH | LOCK_NB, LOCK_UN
+        let f = std::fs::File::open("/proc/self/exe").unwrap();
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&f);
+        let (sh, un) = (flock(fd, 1 | 4), flock(fd, 8));
+        let bad = flock(-1, 1);
+        println!("flock {sh} {un} bad {bad} {}", errno());
+        pipe(fds.as_mut_ptr());
+        // a struct pollfd: fd, then events and revents (POLLIN = 1)
+        let mut pfd = [fds[0], 1];
+        let empty = ppoll(&mut pfd, 1, &[0, 10_000_000], std::ptr::null());
+        write(fds[1], b"x".as_ptr().cast(), 1);
+        let ready = ppoll(&mut pfd, 1, std::ptr::null(), std::ptr::null());
+        println!("ppoll {empty} {ready} revents {}", pfd[1] >> 16);
+        close(fds[0]);
+        close(fds[1]);
+
+        let lo = if_nametoindex(c"lo".as_ptr());
+        let none = if_nametoindex(c"no-such-if0".as_ptr());
+        println!("if_nametoindex lo {lo} none {none} {}", errno());
+        // two datagrams in one call each way, on connected loopback sockets
+        let a = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let b = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        a.connect(b.local_addr().unwrap()).unwrap();
+        b.connect(a.local_addr().unwrap()).unwrap();
+        let (fa, fb) = (std::os::fd::AsRawFd::as_raw_fd(&a), std::os::fd::AsRawFd::as_raw_fd(&b));
+        let (one, two) = (b"one".as_slice(), b"three".as_slice());
+        let mut out = [[one.as_ptr() as usize, one.len()], [two.as_ptr() as usize, two.len()]];
+        let mut send = [MMsgHdr::new(&mut out[0]), MMsgHdr::new(&mut out[1])];
+        let sent = sendmmsg(fa, send.as_mut_ptr(), 2, 0);
+        let mut bufs = [[0u8; 16]; 2];
+        let mut iovs = [[bufs[0].as_mut_ptr() as usize, 16], [bufs[1].as_mut_ptr() as usize, 16]];
+        let (i0, i1) = iovs.split_at_mut(1);
+        let mut recv = [MMsgHdr::new(&mut i0[0]), MMsgHdr::new(&mut i1[0])];
+        // MSG_WAITFORONE: blocks for the first, then takes what is queued
+        let got = recvmmsg(fb, recv.as_mut_ptr(), 2, 0x10000, std::ptr::null_mut());
+        let text = |i: usize| String::from_utf8_lossy(&bufs[i][..recv[i].len as usize]).into_owned();
+        println!("sendmmsg {sent} {} {} recvmmsg {got} {} {}", send[0].len, send[1].len, text(0), text(1));
         *__errno_location() = 2;
         perror(c"perror".as_ptr());
     }

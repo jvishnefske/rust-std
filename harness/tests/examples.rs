@@ -276,6 +276,10 @@ fn check_clib_more(e: &Env) {
         "pthread_once ran 1 [0, 0, 0, 0] again 1\n",
         "getauxval 4096 0 nanosleep 0 true\n",
         "sched_setaffinity 0\n",
+        "flock 0 0 bad -1 9\n",
+        "ppoll 0 1 revents 1\n",
+        "if_nametoindex lo 1 none 0 19\n",
+        "sendmmsg 2 3 5 recvmmsg 2 one three\n",
     ] {
         has(&out, line);
     }
@@ -283,6 +287,7 @@ fn check_clib_more(e: &Env) {
     // a pseudo-terminal, where the system has them
     if std::path::Path::new("/dev/ptmx").exists() && !out.contains("openpty none") {
         has(&out, "openpty true ttyname_r 0 same true\n");
+        has(&out, "tcdrain 0\n");
     }
 }
 

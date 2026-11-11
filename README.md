@@ -63,10 +63,10 @@ small runtime crate instead of libc.
 - **C functions for crates** (`rt/src/clib.rs`, `rt/src/clib/`): crates
   that call libc functions themselves (through the libc crate, as `nix`,
   `memmap2`, `ctrlc` or `terminal_size` do), and C code that crates
-  compile, find 269 of them in rt, written on its syscalls with musl's
+  compile, find 275 of them in rt, written on its syscalls with musl's
   types: file descriptors, files and directory streams, `isatty`,
-  termios and ptys, `mmap`, `sysconf`, CPU affinity, `poll`, epoll and
-  `select`, sockets, signals, semaphores, `getpwuid_r` and friends,
+  termios and ptys, `mmap`, `sysconf`, CPU affinity, `poll`/`ppoll`, epoll
+  and `select`, sockets (`recvmmsg`/`sendmmsg`, `if_nametoindex`), `flock`, signals, semaphores, `getpwuid_r` and friends,
   `fork`/`execvp` and fork handlers, `stat` and `statvfs`, xattrs,
   inotify, mount tables, `malloc` and friends, strings, ctype, `strtol`,
   printf and `sscanf`, pthread keys, mutexes, rwlocks and `pthread_once`,

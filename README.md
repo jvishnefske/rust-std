@@ -164,6 +164,43 @@ that its builds are rebuilt.
   pthreads). `into_pthread_t` detaches the thread, since nothing could join
   it through that value.
 
+## Not implemented yet, and future ideas
+
+Gaps in what is here:
+
+- **Unwinding** stops at signal frames and knows no shared objects
+  (there are none to load: there is no `dlopen`).
+- **DNS**: no EDNS0, no follow-up query for a CNAME whose target is
+  missing from the answer, no RFC 6724 address ordering, and no
+  `LOCALDOMAIN`/`RES_OPTIONS`.
+- **C code** in crates can only call what `rt/src/clib.rs` provides.
+  There is no `__stack_chk_fail` or `_FORTIFY_SOURCE` `__*_chk`
+  functions, and not enough of a C library for OpenSSL (`openssl-src`).
+  linux-none-pkgs builds 40 of its 42 packages for this reason and others
+  (see its README).
+
+Ideas, roughly in order of value:
+
+- **Upstream** std support for `*-linux-none`. Branches holding the
+  backend, on the pinned nightly's commit:
+  [jvishnefske/rust `linux-none-std`](https://github.com/jvishnefske/rust/tree/linux-none-std)
+  and
+  [jvishnefske/backtrace-rs `linux-none`](https://github.com/jvishnefske/backtrace-rs/tree/linux-none).
+  Still needed:
+  - the libc change as a rust-lang/libc PR, instead of a vendored libc;
+  - the backtrace-rs change as its own PR, then a submodule bump;
+  - an `aarch64-unknown-linux-none` target in rustc, instead of
+    `targets/*.json`;
+  - `std: true` for the targets, and CI for them in `x.py`;
+  - a compiler-team proposal first, and a rebase onto rust's master.
+- **Stack protector and fortify** functions in rt, so C code can keep
+  Nix's hardening flags.
+- **More of clib**, driven by which crates fail to link (`nix build
+  .#candidates.<name>` in linux-none-pkgs).
+- **EDNS0 and RFC 6724** ordering in the resolver.
+- **A riscv64 target**: rt's syscall and `_start` code is per
+  architecture, and the rest is shared.
+
 ## Testing
 
 `cargo test` (in the repository root) runs the harness. It builds the

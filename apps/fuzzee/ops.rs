@@ -444,9 +444,12 @@ fn alloc(u: &mut Un, out: &mut String) {
     const ALIGNS: &[usize] = &[1, 2, 8, 16, 64, 4096, 8192];
     // (ptr, layout, fill byte)
     let mut live: Vec<(*mut u8, Layout, u8)> = Vec::new();
+    // `s[1..] == s[..n - 1]` holds only if every byte equals `s[0]`. It
+    // compiles to one memcmp, where a byte loop made this target ~20x slower
+    // than the others in debug builds.
     let check = |p: *mut u8, l: Layout, fill: u8| -> bool {
         let s = unsafe { std::slice::from_raw_parts(p, l.size()) };
-        s.iter().all(|&b| b == fill) && (p as usize).is_multiple_of(l.align())
+        s[0] == fill && s[1..] == s[..s.len() - 1] && (p as usize).is_multiple_of(l.align())
     };
     for step in 0..24 {
         if u.done() {
@@ -483,7 +486,7 @@ fn alloc(u: &mut Un, out: &mut String) {
                 }
                 let kept = l.size().min(new_size);
                 let nl = Layout::from_size_align(new_size, l.align()).unwrap();
-                let prefix_ok = unsafe { std::slice::from_raw_parts(q, kept) }.iter().all(|&b| b == fill);
+                let prefix_ok = check(q, Layout::from_size_align(kept, 1).unwrap(), fill);
                 if !prefix_ok || !(q as usize).is_multiple_of(l.align()) {
                     let _ = writeln!(out, "{step}: CORRUPT after realloc");
                 }

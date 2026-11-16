@@ -1,0 +1,21 @@
+# Cargo configuration for building a crate for linux-none with the
+# `linux-none` toolchain (`cargo xtask sysroot`):
+#
+#   cargo +linux-none build --config /path/to/rust-std/linux-none.toml
+#
+# (apps/.cargo/config.toml is the same, plus qemu as aarch64's runner.)
+
+[build]
+target = "x86_64-unknown-linux-none"
+
+[unstable]
+build-std = ["std", "panic_abort"]
+build-std-features = ["compiler-builtins-mem", "backtrace"]
+json-target-spec = true
+
+# static, non-PIE: the runtime does not relocate itself
+[target.x86_64-unknown-linux-none]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static", "-C", "link-arg=-no-pie"]
+
+[target.aarch64-unknown-linux-none]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static", "-C", "link-arg=-no-pie"]

@@ -18,6 +18,33 @@ $ file target/x86_64-unknown-linux-none/debug/hello
 ... ELF 64-bit LSB executable, x86-64, ..., statically linked ...
 ```
 
+## Quickstart
+
+With rustup, for your own crate:
+
+```console
+$ git clone https://github.com/jvishnefske/rust-std ~/rust-std
+$ (cd ~/rust-std && cargo xtask sysroot)      # the `linux-none` toolchain
+$ cargo +linux-none build --config ~/rust-std/linux-none.toml
+```
+
+`cargo xtask sysroot` runs on the nightly pinned in `rust-toolchain.toml`
+(rustup installs it, with `rust-src`) and registers a copy of it as
+`linux-none`, whose `rust-src` is the patched std. `linux-none.toml` sets
+the target, `-Zbuild-std` and the static, non-PIE link flags. No
+environment variables are involved. A weekly CI job
+(`.github/workflows/nightly.yml`) applies the patches to the latest
+nightly and opens an issue when they no longer apply or build; moving the
+pin is a manual step. With
+Nix, [linux-none-pkgs](https://github.com/jvishnefske/linux-none-pkgs)
+rebuilds nixpkgs' Rust packages, and others, this way:
+
+```console
+$ nix build github:jvishnefske/linux-none-pkgs#ripgrep     # result/bin/rg
+$ nix run github:jvishnefske/linux-none-pkgs#bench         # against musl and glibc
+$ nix flake init -t github:jvishnefske/linux-none-pkgs     # your crate, with lib.buildLinuxNone
+```
+
 ## How it works
 
 Rust has a built-in target `x86_64-unknown-linux-none` (Linux, no libc, no

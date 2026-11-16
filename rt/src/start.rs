@@ -34,6 +34,8 @@ pub(crate) unsafe extern "C" fn start(sp: *const usize) -> ! {
     }
     unsafe {
         init(sp);
+        // before the main thread's TLS, whose TCB holds a copy (x86_64)
+        crate::clib::init_stack_guard();
         crate::vdso::init();
         crate::tls::init_main_thread();
         run_init_array();

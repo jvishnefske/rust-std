@@ -19,9 +19,15 @@ use crate::elf::{PT_TLS, Phdr};
 #[cfg(linux_none)]
 use crate::sys;
 
-/// Bytes of TCB at the thread pointer that the runtime owns: x86_64's
-/// self-pointer, aarch64's two reserved words.
-const TCB_SIZE: usize = 16;
+/// Bytes of TCB at the thread pointer that the runtime owns: on x86_64,
+/// the self-pointer, [`THREAD_WORD`] and [`CANARY_WORD`]; on aarch64, the
+/// two reserved words.
+const TCB_SIZE: usize = if cfg!(target_arch = "x86_64") { 64 } else { 16 };
+
+/// The TCB word with the stack canary on x86_64: `%fs:0x28`, where glibc
+/// keeps it and gcc's `-fstack-protector` reads it (see clib's `fortify`).
+#[cfg_attr(not(linux_none), allow(dead_code))]
+const CANARY_WORD: usize = 5;
 
 /// The `PT_TLS` segment: initialized data (`.tdata`) followed by zeroed
 /// data (`.tbss`).
@@ -125,6 +131,10 @@ pub unsafe fn init_area(area: *mut u8) -> usize {
         let tcb = tp as *mut usize;
         if cfg!(target_arch = "x86_64") {
             *tcb = tp;
+            #[cfg(linux_none)]
+            {
+                *tcb.add(CANARY_WORD) = crate::clib::stack_guard();
+            }
         } else {
             *tcb = 0;
         }

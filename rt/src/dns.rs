@@ -1,6 +1,7 @@
 //! A DNS stub resolver, as `getaddrinfo` needs one: the configuration in
-//! `/etc/resolv.conf`, A and AAAA queries over UDP (and TCP when an answer
-//! is truncated), and CNAME chains inside an answer.
+//! `/etc/resolv.conf`, A and AAAA queries over UDP with EDNS0 (and TCP when
+//! an answer is truncated), CNAME chains inside an answer, and the
+//! addresses in RFC 6724's order.
 //!
 //! It follows glibc's semantics where they differ from musl's: each
 //! nameserver is asked in turn, `timeout` is per server and attempt, and a
@@ -23,15 +24,24 @@ const MAXNAME: usize = if cfg!(kani) { 12 } else { 255 };
 const MAXCNAME: usize = 8;
 /// Compression pointers followed inside one name.
 const MAXJUMPS: usize = 32;
-/// The largest query: header, name, type and class.
-const MAXQUERY: usize = 12 + MAXNAME + 4;
+/// An EDNS0 OPT record (RFC 6891): the root name, type, the UDP payload
+/// size as its class, a zero TTL (extended rcode, version, flags) and no
+/// data.
+const OPT_LEN: usize = 11;
+/// The UDP payload size queries advertise: the 1232 bytes DNS Flag Day
+/// 2020 chose, which avoid IP fragmentation.
+pub const EDNS_PAYLOAD: u16 = 1232;
+/// The largest query: header, name, type, class and OPT record.
+const MAXQUERY: usize = 12 + MAXNAME + 4 + OPT_LEN;
 
 pub const TYPE_A: u16 = 1;
 pub const TYPE_CNAME: u16 = 5;
 pub const TYPE_AAAA: u16 = 28;
+const TYPE_OPT: u16 = 41;
 const CLASS_IN: u16 = 1;
 
 const RCODE_NOERROR: u8 = 0;
+const RCODE_FORMERR: u8 = 1;
 const RCODE_SERVFAIL: u8 = 2;
 const RCODE_NXDOMAIN: u8 = 3;
 
@@ -271,15 +281,29 @@ pub fn read_name(msg: &[u8], mut pos: usize) -> Option<(Name, usize)> {
     }
 }
 
-/// A query for `name`'s records of `qtype`, with recursion desired.
-/// Returns its length in `out`.
-pub fn build_query(out: &mut [u8; MAXQUERY], id: u16, name: &Name, qtype: u16) -> usize {
-    out[..12].copy_from_slice(&[0, 0, 0x01, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+/// A query for `name`'s records of `qtype`, with recursion desired, and
+/// with an EDNS0 OPT record if `edns`. Returns its length in `out`.
+pub fn build_query(out: &mut [u8; MAXQUERY], id: u16, name: &Name, qtype: u16, edns: bool) -> usize {
+    out[..12].copy_from_slice(&[0, 0, 0x01, 0, 0, 1, 0, 0, 0, 0, 0, edns as u8]);
     out[..2].copy_from_slice(&id.to_be_bytes());
     let n = name.as_bytes();
     out[12..12 + n.len()].copy_from_slice(n);
     out[12 + n.len()..16 + n.len()].copy_from_slice(&[(qtype >> 8) as u8, qtype as u8, 0, CLASS_IN as u8]);
-    16 + n.len()
+    let len = 16 + n.len();
+    if !edns {
+        return len;
+    }
+    let [hi, lo] = EDNS_PAYLOAD.to_be_bytes();
+    out[len..len + OPT_LEN].copy_from_slice(&[0, 0, TYPE_OPT as u8, hi, lo, 0, 0, 0, 0, 0, 0]);
+    len + OPT_LEN
+}
+
+/// Whether `msg` is a FORMERR reply to the query `id`: how a server
+/// without EDNS0 answers a query with an OPT record. Such servers need not
+/// echo the question, so it is not checked.
+fn is_formerr(msg: &[u8], id: u16) -> bool {
+    let Some(flags) = be16(msg, 2) else { return false };
+    be16(msg, 0) == Some(id) && flags & 0x8000 != 0 && flags & 0x7800 == 0 && (flags & 0xf) as u8 == RCODE_FORMERR
 }
 
 fn be16(msg: &[u8], pos: usize) -> Option<u16> {
@@ -402,9 +426,10 @@ pub fn parse_answers(msg: &[u8], qname: &Name, qtype: u16, out: &mut [IpAddr], n
 }
 
 /// Looks `name` up as [`Config`] says, trying the search domains, and
-/// writes its addresses to `out` (IPv4 before IPv6) and returns how many.
-/// `random` makes the query ids. `buf` receives replies: 512 bytes are
-/// enough for UDP, TCP replies need up to 65535.
+/// writes its addresses to `out` (in RFC 6724's order, see
+/// [`sort_addrs`]) and returns how many. `random` makes the query ids.
+/// `buf` receives replies: [`EDNS_PAYLOAD`] bytes are enough for UDP, TCP
+/// replies need up to 65535.
 pub fn lookup(conf: &Config, name: &[u8], family: Family, random: &mut dyn FnMut() -> u16, buf: &mut [u8], out: &mut [IpAddr]) -> Result<usize, Error> {
     let absolute = name.ends_with(b".");
     let full = Name::from_text(name).ok_or(Error::NoName)?;
@@ -449,8 +474,8 @@ fn query(conf: &Config, qname: &Name, family: Family, random: &mut dyn FnMut() -
             match ask(ns, qname, qtypes, conf.timeout_ms, random, buf, out) {
                 Ok(0) => return Err(Error::NoName),
                 Ok(n) => {
-                    // IPv4 first: the order connecting tries them in
-                    v4_first(&mut out[..n]);
+                    // the order connecting tries them in
+                    sort_addrs(&mut out[..n]);
                     return Ok(n);
                 }
                 // an authoritative answer: no point asking elsewhere
@@ -463,16 +488,120 @@ fn query(conf: &Config, qname: &Name, family: Family, random: &mut dyn FnMut() -
     Err(err)
 }
 
-/// Moves the IPv4 addresses ahead of the IPv6 ones, keeping their order
-/// otherwise (an insertion sort: there are few).
-fn v4_first(addrs: &mut [IpAddr]) {
+/// RFC 6724's default policy table, longest prefixes first: prefix,
+/// prefix length, precedence and label. IPv4 addresses are looked up as
+/// `::ffff:a.b.c.d`.
+const POLICY: [([u8; 16], u32, u8, u8); 9] = [
+    ([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 128, 50, 0),
+    ([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0, 0, 0], 96, 35, 4),
+    ([0; 16], 96, 1, 3),
+    ([0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 32, 5, 5),
+    ([0x20, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 16, 30, 2),
+    ([0x3f, 0xfe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 16, 1, 12),
+    ([0xfe, 0xc0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10, 1, 11),
+    ([0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 7, 3, 13),
+    ([0; 16], 0, 40, 1),
+];
+
+fn v6(ip: &IpAddr) -> Ipv6Addr {
+    match ip {
+        IpAddr::V4(a) => a.to_ipv6_mapped(),
+        IpAddr::V6(a) => *a,
+    }
+}
+
+/// Leading bits `a` and `b` have in common.
+fn common_prefix(a: &Ipv6Addr, b: &Ipv6Addr) -> u32 {
+    (a.to_bits() ^ b.to_bits()).leading_zeros()
+}
+
+/// `ip`'s precedence and label in [`POLICY`].
+fn policy(ip: &IpAddr) -> (u8, u8) {
+    let a = v6(ip);
+    let p = POLICY.iter().find(|(prefix, len, ..)| common_prefix(&a, &Ipv6Addr::from(*prefix)) >= *len).unwrap();
+    (p.2, p.3)
+}
+
+/// `ip`'s scope (RFC 6724 3.1): 2 for link-local (with IPv4's loopback and
+/// 169.254/16), 5 site-local, 14 global, a multicast address's own.
+fn scope(ip: &IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(a) if a.is_loopback() || a.is_link_local() => 2,
+        IpAddr::V4(_) => 14,
+        IpAddr::V6(a) => match a.octets() {
+            _ if a.to_ipv4_mapped().is_some() => scope(&IpAddr::V4(a.to_ipv4_mapped().unwrap())),
+            [0xff, s, ..] => s & 0xf,
+            [0xfe, b, ..] if b & 0xc0 == 0x80 => 2,
+            [0xfe, b, ..] if b & 0xc0 == 0xc0 => 5,
+            _ if a.is_loopback() => 2,
+            _ => 14,
+        },
+    }
+}
+
+/// At most this many addresses are sorted (std keeps 48).
+const MAXSORT: usize = 64;
+
+/// Sorts `addrs` as RFC 6724's destination address selection does, given
+/// the source address the kernel would pick for each (`None`: no route).
+/// Of its rules, those that need more than that are left out: 3 (deprecated
+/// sources), 4 (home addresses) and 7 (native transport). The rest, in
+/// order: usable before unusable, then matching scope, matching label,
+/// higher precedence, smaller scope and longer common prefix (IPv6, up to
+/// the 64 bits of a prefix), and otherwise the order they came in.
+pub fn sort_by_rfc6724(addrs: &mut [IpAddr], source: &mut dyn FnMut(&IpAddr) -> Option<IpAddr>) {
+    let n = addrs.len().min(MAXSORT);
+    let addrs = &mut addrs[..n];
+    let mut keys = [0u32; MAXSORT];
+    for (k, dst) in keys.iter_mut().zip(addrs.iter()) {
+        let (prec, label) = policy(dst);
+        let dscope = scope(dst);
+        *k = (prec as u32) << 20 | (15 - dscope as u32) << 16;
+        if let Some(src) = source(dst) {
+            *k |= 1 << 30;
+            if scope(&src) == dscope {
+                *k |= 1 << 29;
+            }
+            if policy(&src).1 == label {
+                *k |= 1 << 28;
+            }
+            if dst.is_ipv6() && src.is_ipv6() {
+                *k |= common_prefix(&v6(dst), &v6(&src)).min(64) << 8;
+            }
+        }
+    }
+    // an insertion sort, which keeps equal keys in order: there are few
     for i in 1..addrs.len() {
         let mut j = i;
-        while j > 0 && addrs[j - 1].is_ipv6() && addrs[j].is_ipv4() {
+        while j > 0 && keys[j - 1] < keys[j] {
+            keys.swap(j - 1, j);
             addrs.swap(j - 1, j);
             j -= 1;
         }
     }
+}
+
+/// The source address the kernel would use to reach `dst`: what a UDP
+/// socket connected to it is bound to (connecting sends nothing).
+pub fn source_addr(dst: &IpAddr) -> Option<IpAddr> {
+    let dst = SocketAddr::new(*dst, 53);
+    let domain = if dst.is_ipv4() { sys::AF_INET } else { sys::AF_INET6 };
+    let fd = Fd(sys::socket(domain, sys::SOCK_DGRAM | sys::SOCK_CLOEXEC, 0).ok()?);
+    let (sa, salen) = sockaddr(&dst);
+    unsafe { sys::connect(fd.0, sa.as_ptr(), salen) }.ok()?;
+    let mut sa = [0u8; 28];
+    let mut len = sa.len() as u32;
+    unsafe { sys::getsockname(fd.0, sa.as_mut_ptr(), &mut len) }.ok()?;
+    Some(if dst.is_ipv4() {
+        IpAddr::V4(Ipv4Addr::new(sa[4], sa[5], sa[6], sa[7]))
+    } else {
+        IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&sa[8..24]).unwrap()))
+    })
+}
+
+/// [`sort_by_rfc6724`] with the kernel's source addresses.
+pub fn sort_addrs(addrs: &mut [IpAddr]) {
+    sort_by_rfc6724(addrs, &mut source_addr)
 }
 
 /// A file descriptor, closed on drop.
@@ -540,6 +669,8 @@ fn same_addr(sa: &[u8; 28], len: u32, addr: &SocketAddr) -> bool {
 struct Pending {
     qtype: u16,
     id: u16,
+    /// whether the query carries an OPT record (until a FORMERR)
+    edns: bool,
     query: [u8; MAXQUERY],
     len: usize,
     done: bool,
@@ -557,15 +688,15 @@ fn ask(ns: &SocketAddr, qname: &Name, qtypes: &[u16], timeout_ms: u32, random: &
     if unsafe { sys::connect(fd.0, sa.as_ptr(), salen) }.is_err() {
         return Err(Error::Again);
     }
-    let mut pending = [const { Pending { qtype: 0, id: 0, query: [0; MAXQUERY], len: 0, done: true } }; 2];
+    let mut pending = [const { Pending { qtype: 0, id: 0, edns: true, query: [0; MAXQUERY], len: 0, done: true } }; 2];
     for (i, &qtype) in qtypes.iter().enumerate() {
         let mut id = random();
         if i > 0 && id == pending[0].id {
             id ^= 1;
         }
         let p = &mut pending[i];
-        *p = Pending { qtype, id, query: [0; MAXQUERY], len: 0, done: false };
-        p.len = build_query(&mut p.query, id, qname, qtype);
+        *p = Pending { qtype, id, edns: true, query: [0; MAXQUERY], len: 0, done: false };
+        p.len = build_query(&mut p.query, id, qname, qtype, true);
         if unsafe { sys::sendto(fd.0, p.query.as_ptr(), p.len, sys::MSG_NOSIGNAL, core::ptr::null(), 0) }.is_err() {
             return Err(Error::Again);
         }
@@ -589,6 +720,15 @@ fn ask(ns: &SocketAddr, qname: &Name, qtypes: &[u16], timeout_ms: u32, random: &
             continue;
         }
         let Some(p) = pending.iter_mut().find(|p| !p.done && be16(&buf[..len], 0) == Some(p.id)) else { continue };
+        if p.edns && is_formerr(&buf[..len], p.id) {
+            // a server without EDNS0 (RFC 6891 7): ask again without it
+            p.edns = false;
+            p.len = build_query(&mut p.query, p.id, qname, p.qtype, false);
+            if unsafe { sys::sendto(fd.0, p.query.as_ptr(), p.len, sys::MSG_NOSIGNAL, core::ptr::null(), 0) }.is_err() {
+                return Err(Error::Again);
+            }
+            continue;
+        }
         let Some(mut reply) = check_reply(&buf[..len], p.id, qname, p.qtype) else { continue };
         let mut len = len;
         if reply.truncated {

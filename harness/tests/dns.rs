@@ -25,6 +25,8 @@ struct Query {
     tcp: bool,
     /// the question section, to echo back
     question: Vec<u8>,
+    /// the UDP payload size of an EDNS0 OPT record, if there is one
+    edns: Option<u16>,
 }
 
 fn parse_query(msg: &[u8], tcp: bool) -> Query {
@@ -36,7 +38,12 @@ fn parse_query(msg: &[u8], tcp: bool) -> Query {
         pos += 1 + len;
     }
     let qtype = u16::from_be_bytes([msg[pos + 1], msg[pos + 2]]);
+    // an OPT record: root name, type 41, the payload size as its class
+    let arcount = u16::from_be_bytes([msg[10], msg[11]]);
+    let opt = &msg[pos + 5..];
+    let edns = (arcount == 1 && opt.len() == 11 && opt[..3] == [0, 0, 41]).then(|| u16::from_be_bytes([opt[3], opt[4]]));
     Query {
+        edns,
         id: u16::from_be_bytes([msg[0], msg[1]]),
         name: labels.join("."),
         qtype,
@@ -210,8 +217,11 @@ fn a_and_aaaa() {
         vec![Action::Send(reply(q, 0, false, &answers))]
     });
     let conf = config(&[srv.addr], 2000, 1);
-    // IPv4 first, in the server's order
-    assert_eq!(lookup(&conf, "www.example.test").unwrap(), [v4("192.0.2.1"), v4("192.0.2.2"), v4("2001:db8::1")]);
+    // in RFC 6724's order for this host's routes (IPv4 first without an
+    // IPv6 route), else in the server's
+    let mut want = [v4("192.0.2.1"), v4("192.0.2.2"), v4("2001:db8::1")];
+    dns::sort_addrs(&mut want);
+    assert_eq!(lookup(&conf, "www.example.test").unwrap(), want);
     assert_eq!(lookup_with(&conf, "www.example.test", Family::V6, &mut random).unwrap(), [v4("2001:db8::1")]);
     // names compare without regard to case
     assert_eq!(lookup_with(&conf, "WWW.Example.TEST", Family::V4, &mut random).unwrap().len(), 2);
@@ -264,16 +274,97 @@ fn cname_loop_has_no_addresses() {
 }
 
 #[test]
-fn truncated_reply_is_asked_again_over_tcp() {
-    // 40 addresses do not fit in 512 bytes
+fn queries_carry_edns0() {
+    // 40 addresses do not fit in 512 bytes, but do in EDNS0's 1232
     let srv = Server::start(|q| {
         let all: Vec<Rr> = (0..40).map(|i| a(None, [10, 0, 0, i])).collect();
+        let m = reply(q, 0, false, &all);
+        assert!(m.len() > 512 && m.len() <= 1232);
+        vec![Action::Send(if q.edns.is_some() { m } else { reply(q, 0, true, &all[..3]) })]
+    });
+    let conf = config(&[srv.addr], 2000, 1);
+    let got = lookup_with(&conf, "big.test", Family::V4, &mut random).unwrap();
+    assert_eq!(got.len(), 40);
+    // no TCP: the UDP answer was whole
+    assert_eq!(srv.seen(), [("big.test".into(), A, false)]);
+    assert_eq!(srv.seen.lock().unwrap()[0].edns, Some(dns::EDNS_PAYLOAD));
+}
+
+#[test]
+fn formerr_is_asked_again_without_edns0() {
+    // a server that knows no EDNS0: FORMERR, without the question
+    let srv = Server::start(|q| {
+        if q.edns.is_some() {
+            let mut m = reply(q, 1, false, &[]);
+            m[5] = 0;
+            m.truncate(12);
+            vec![Action::Send(m)]
+        } else {
+            vec![Action::Send(reply(q, 0, false, &[a(None, [192, 0, 2, 9])]))]
+        }
+    });
+    let conf = config(&[srv.addr], 2000, 1);
+    assert_eq!(lookup_with(&conf, "old.test", Family::V4, &mut random).unwrap(), [v4("192.0.2.9")]);
+    let edns: Vec<_> = srv.seen.lock().unwrap().iter().map(|q| q.edns).collect();
+    assert_eq!(edns, [Some(dns::EDNS_PAYLOAD), None]);
+}
+
+/// [`dns::sort_by_rfc6724`] of `dsts`, with `sources[i]` the source address
+/// for `dsts[i]` (`""`: no route).
+fn rfc6724(dsts: &[&str], sources: &[&str]) -> Vec<IpAddr> {
+    let table: Vec<(IpAddr, Option<IpAddr>)> = dsts.iter().zip(sources).map(|(d, s)| (v4(d), s.parse().ok())).collect();
+    let mut v: Vec<IpAddr> = table.iter().map(|(d, _)| *d).collect();
+    dns::sort_by_rfc6724(&mut v, &mut |d| table.iter().find(|(x, _)| x == d).unwrap().1);
+    v
+}
+
+fn ips(s: &[&str]) -> Vec<IpAddr> {
+    s.iter().map(|s| v4(s)).collect()
+}
+
+#[test]
+fn rfc6724_order() {
+    // rule 1: no route to IPv6, so IPv4 first; with one, IPv6 (precedence
+    // 40 over IPv4's 35)
+    assert_eq!(rfc6724(&["2001:db8::1", "192.0.2.1"], &["", "192.0.2.100"]), ips(&["192.0.2.1", "2001:db8::1"]));
+    assert_eq!(rfc6724(&["192.0.2.1", "2001:db8::1"], &["192.0.2.100", "2001:db8::2"]), ips(&["2001:db8::1", "192.0.2.1"]));
+    // rule 2: a global destination reached from a link-local source loses
+    // to one with a source of matching scope
+    assert_eq!(rfc6724(&["2001:db8::1", "192.0.2.1"], &["fe80::1", "192.0.2.100"]), ips(&["192.0.2.1", "2001:db8::1"]));
+    // rule 5 (RFC 6724's example 10.2): 6to4 to 6to4, despite precedence
+    assert_eq!(
+        rfc6724(&["2001:db8:1::1", "2002:c633:6401::1"], &["2002:c633:6401::2", "2002:c633:6401::2"]),
+        ips(&["2002:c633:6401::1", "2001:db8:1::1"])
+    );
+    // rule 6: loopback (50) over global (40); Teredo (5) last
+    assert_eq!(
+        rfc6724(&["2001::1", "2001:db8::1", "::1"], &["2001::2", "2001:db8::2", "::1"]),
+        ips(&["::1", "2001:db8::1", "2001::1"])
+    );
+    // rule 8: link-local before global
+    assert_eq!(rfc6724(&["2001:db8::1", "fe80::1"], &["2001:db8::2", "fe80::2"]), ips(&["fe80::1", "2001:db8::1"]));
+    assert_eq!(rfc6724(&["192.0.2.1", "127.0.0.1"], &["192.0.2.100", "127.0.0.1"]), ips(&["127.0.0.1", "192.0.2.1"]));
+    // rule 9: the longer common prefix with the source (up to 64 bits)
+    assert_eq!(
+        rfc6724(&["2001:db8:2::1", "2001:db8:1::1"], &["2001:db8:1::2", "2001:db8:1::2"]),
+        ips(&["2001:db8:1::1", "2001:db8:2::1"])
+    );
+    // rule 10: otherwise as given
+    assert_eq!(rfc6724(&["192.0.2.2", "192.0.2.1"], &["192.0.2.100", "192.0.2.100"]), ips(&["192.0.2.2", "192.0.2.1"]));
+    assert_eq!(rfc6724(&["2001:db8::1:2", "2001:db8::1:1"], &["2001:db8::9", "2001:db8::9"]), ips(&["2001:db8::1:2", "2001:db8::1:1"]));
+}
+
+#[test]
+fn truncated_reply_is_asked_again_over_tcp() {
+    // 100 addresses do not fit in 1232 bytes
+    let srv = Server::start(|q| {
+        let all: Vec<Rr> = (0..100).map(|i| a(None, [10, 0, 0, i])).collect();
         let answers = if q.tcp { &all[..] } else { &all[..3] };
         vec![Action::Send(reply(q, 0, !q.tcp, answers))]
     });
     let conf = config(&[srv.addr], 2000, 1);
     let got = lookup_with(&conf, "big.test", Family::V4, &mut random).unwrap();
-    assert_eq!(got, (0..40).map(|i| IpAddr::V4(Ipv4Addr::new(10, 0, 0, i))).collect::<Vec<_>>());
+    assert_eq!(got, (0..48).map(|i| IpAddr::V4(Ipv4Addr::new(10, 0, 0, i))).collect::<Vec<_>>());
     assert_eq!(srv.seen(), [("big.test".into(), A, false), ("big.test".into(), A, true)]);
 }
 

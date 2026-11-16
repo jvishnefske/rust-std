@@ -1,5 +1,12 @@
 //! A small mmap-backed allocator: power-of-two size classes with free lists
 //! for blocks up to 32 KiB, direct `mmap` for everything larger.
+//!
+//! The free lists and the bump region are one heap for the process, behind
+//! a lock. On linux-none each thread keeps a cache of free blocks per class
+//! in front of it, so that most allocations and frees take no lock: a
+//! thread refills an empty class, and hands back half of a full one, a
+//! batch at a time under one lock. A thread's cache goes back to the heap
+//! when it exits ([`flush_thread_cache`]).
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
@@ -13,7 +20,11 @@ const MAX_SHIFT: u32 = 15; // 32 KiB
 const NCLASSES: usize = (MAX_SHIFT - MIN_SHIFT + 1) as usize;
 const CHUNK: usize = 1 << 20;
 
-pub struct Allocator {
+/// A handle on the process's heap (std's global allocator and the C
+/// library's `malloc` share it).
+pub struct Allocator;
+
+struct Heap {
     lock: RawMutex,
     state: UnsafeCell<State>,
 }
@@ -24,7 +35,12 @@ struct State {
     end: usize,
 }
 
-unsafe impl Sync for Allocator {}
+unsafe impl Sync for Heap {}
+
+static HEAP: Heap = Heap {
+    lock: RawMutex::new(),
+    state: UnsafeCell::new(State { free: [null_mut(); NCLASSES], bump: 0, end: 0 }),
+};
 
 /// Size class index for a layout, or None if it goes straight to mmap.
 #[inline]
@@ -49,42 +65,151 @@ unsafe fn map(len: usize) -> *mut u8 {
     }
 }
 
-impl Allocator {
-    pub const fn new() -> Self {
-        Allocator {
-            lock: RawMutex::new(),
-            state: UnsafeCell::new(State { free: [null_mut(); NCLASSES], bump: 0, end: 0 }),
+/// Blocks a thread caches of class `class`: 64 KiB worth, 4 to 64 of them.
+#[cfg_attr(not(linux_none), allow(dead_code))]
+const fn cache_limit(class: usize) -> usize {
+    let n = (64 << 10) >> (class as u32 + MIN_SHIFT);
+    if n < 4 { 4 } else if n > 64 { 64 } else { n }
+}
+
+impl State {
+    /// A block of `class` from the free list or the bump region (null if
+    /// out of memory). The heap's lock must be held.
+    unsafe fn take(&mut self, class: usize) -> *mut u8 {
+        let size = 1usize << (class as u32 + MIN_SHIFT);
+        let head = self.free[class];
+        if !head.is_null() {
+            self.free[class] = unsafe { *(head as *mut *mut u8) };
+            return head;
         }
+        // every block of a class is aligned to min(size, page) so that any
+        // layout mapping to the class is satisfied by any of its blocks
+        let align = size.min(PAGE_SIZE);
+        let mut start = round_up(self.bump, align);
+        if self.bump == 0 || start + size > self.end {
+            let chunk = unsafe { map(CHUNK) } as usize;
+            if chunk == 0 {
+                return null_mut();
+            }
+            self.bump = chunk;
+            self.end = chunk + CHUNK;
+            start = chunk;
+        }
+        self.bump = start + size;
+        start as *mut u8
     }
 
-    unsafe fn alloc_small(&self, class: usize) -> *mut u8 {
-        let size = 1usize << (class as u32 + MIN_SHIFT);
+    /// Put `p` on `class`'s free list. The heap's lock must be held.
+    unsafe fn put(&mut self, class: usize, p: *mut u8) {
+        unsafe { *(p as *mut *mut u8) = self.free[class] };
+        self.free[class] = p;
+    }
+}
+
+impl Heap {
+    fn with<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
         self.lock.lock();
-        let st = unsafe { &mut *self.state.get() };
-        let head = st.free[class];
-        let p = if !head.is_null() {
-            st.free[class] = unsafe { *(head as *mut *mut u8) };
-            head
-        } else {
-            // every block of a class is aligned to min(size, page) so that any
-            // layout mapping to the class is satisfied by any of its blocks
-            let align = size.min(PAGE_SIZE);
-            let mut start = round_up(st.bump, align);
-            if st.bump == 0 || start + size > st.end {
-                let chunk = unsafe { map(CHUNK) } as usize;
-                if chunk == 0 {
-                    unsafe { self.lock.unlock() };
-                    return null_mut();
-                }
-                st.bump = chunk;
-                st.end = chunk + CHUNK;
-                start = chunk;
-            }
-            st.bump = start + size;
-            start as *mut u8
-        };
+        let r = f(unsafe { &mut *self.state.get() });
         unsafe { self.lock.unlock() };
+        r
+    }
+}
+
+/// A thread's free blocks, per class: a list linked through the blocks.
+#[cfg(linux_none)]
+struct Cache {
+    free: [*mut u8; NCLASSES],
+    count: [usize; NCLASSES],
+}
+
+#[cfg(linux_none)]
+#[thread_local]
+static mut CACHE: Cache = Cache { free: [null_mut(); NCLASSES], count: [0; NCLASSES] };
+
+#[cfg(linux_none)]
+fn cache() -> &'static mut Cache {
+    unsafe { &mut *(&raw mut CACHE) }
+}
+
+#[cfg(linux_none)]
+unsafe fn alloc_small(class: usize) -> *mut u8 {
+    let c = cache();
+    let p = c.free[class];
+    if !p.is_null() {
+        c.free[class] = unsafe { *(p as *mut *mut u8) };
+        c.count[class] -= 1;
+        return p;
+    }
+    // refill: one block to return, half the limit more for the cache
+    HEAP.with(|st| unsafe {
+        let p = st.take(class);
+        for _ in 0..cache_limit(class) / 2 {
+            let q = st.take(class);
+            if q.is_null() {
+                break;
+            }
+            *(q as *mut *mut u8) = c.free[class];
+            c.free[class] = q;
+            c.count[class] += 1;
+        }
         p
+    })
+}
+
+#[cfg(linux_none)]
+unsafe fn dealloc_small(class: usize, p: *mut u8) {
+    let c = cache();
+    unsafe { *(p as *mut *mut u8) = c.free[class] };
+    c.free[class] = p;
+    c.count[class] += 1;
+    if c.count[class] > cache_limit(class) {
+        // hand half back
+        HEAP.with(|st| unsafe {
+            for _ in 0..cache_limit(class) / 2 {
+                let q = c.free[class];
+                c.free[class] = *(q as *mut *mut u8);
+                c.count[class] -= 1;
+                st.put(class, q);
+            }
+        });
+    }
+}
+
+/// Return the calling thread's cached blocks to the heap (as it exits).
+pub fn flush_thread_cache() {
+    #[cfg(linux_none)]
+    {
+        let c = cache();
+        if c.count.iter().all(|&n| n == 0) {
+            return;
+        }
+        HEAP.with(|st| unsafe {
+            for class in 0..NCLASSES {
+                while !c.free[class].is_null() {
+                    let q = c.free[class];
+                    c.free[class] = *(q as *mut *mut u8);
+                    st.put(class, q);
+                }
+                c.count[class] = 0;
+            }
+        });
+    }
+}
+
+// elsewhere (host tests, Kani): straight to the heap
+#[cfg(not(linux_none))]
+unsafe fn alloc_small(class: usize) -> *mut u8 {
+    HEAP.with(|st| unsafe { st.take(class) })
+}
+
+#[cfg(not(linux_none))]
+unsafe fn dealloc_small(class: usize, p: *mut u8) {
+    HEAP.with(|st| unsafe { st.put(class, p) })
+}
+
+impl Allocator {
+    pub const fn new() -> Self {
+        Allocator
     }
 
     unsafe fn alloc_large(layout: Layout) -> *mut u8 {
@@ -115,20 +240,14 @@ impl Allocator {
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         match class_of(&layout) {
-            Some(c) => unsafe { self.alloc_small(c) },
+            Some(c) => unsafe { alloc_small(c) },
             None => unsafe { Self::alloc_large(layout) },
         }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         match class_of(&layout) {
-            Some(c) => {
-                self.lock.lock();
-                let st = unsafe { &mut *self.state.get() };
-                unsafe { *(ptr as *mut *mut u8) = st.free[c] };
-                st.free[c] = ptr;
-                unsafe { self.lock.unlock() };
-            }
+            Some(c) => unsafe { dealloc_small(c, ptr) },
             None => unsafe {
                 let _ = linux::munmap(ptr as usize, round_up(layout.size(), PAGE_SIZE));
             },
@@ -138,7 +257,7 @@ unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         match class_of(&layout) {
             Some(c) => {
-                let p = unsafe { self.alloc_small(c) };
+                let p = unsafe { alloc_small(c) };
                 if !p.is_null() {
                     unsafe { core::ptr::write_bytes(p, 0, layout.size()) };
                 }
@@ -208,6 +327,14 @@ mod proofs {
                 assert!(1usize << (c as u32 + MIN_SHIFT) >= new);
             }
         }
+    }
+
+    /// A thread caches 4 to 64 blocks of each class, and a refill or a
+    /// hand-back moves at least two.
+    #[kani::proof]
+    fn cache_limits() {
+        let c: usize = kani::any_where(|&c| c < NCLASSES);
+        assert!((4..=64).contains(&cache_limit(c)) && cache_limit(c) / 2 >= 2);
     }
 
     #[kani::proof]

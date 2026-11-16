@@ -138,6 +138,8 @@ extern "C" fn thread_start(arg: *mut u8) -> ! {
         if hook != 0 {
             core::mem::transmute::<usize, fn()>(hook)();
         }
+        // after the last destructor that could free memory
+        crate::alloc::flush_thread_cache();
         if (*ctl).altstack > 0 {
             signal::disable_altstack();
         }

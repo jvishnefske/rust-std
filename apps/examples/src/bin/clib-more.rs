@@ -8,6 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 unsafe extern "C" {
     fn __errno_location() -> *mut c_int;
+    fn open64(path: *const c_char, flags: c_int, mode: u32) -> c_int;
+    fn lseek64(fd: c_int, off: i64, whence: c_int) -> i64;
+    fn fstat64(fd: c_int, st: *mut [u64; 18]) -> c_int;
     fn strchr(s: *const c_char, c: c_int) -> *mut c_char;
     fn strrchr(s: *const c_char, c: c_int) -> *mut c_char;
     fn strstr(h: *const c_char, n: *const c_char) -> *mut c_char;
@@ -431,6 +434,14 @@ fn main() {
         let got = recvmmsg(fb, recv.as_mut_ptr(), 2, 0x10000, std::ptr::null_mut());
         let text = |i: usize| String::from_utf8_lossy(&bufs[i][..recv[i].len as usize]).into_owned();
         println!("sendmmsg {sent} {} {} recvmmsg {got} {} {}", send[0].len, send[1].len, text(0), text(1));
+        // the LFS names: a file's size, by seeking to its end and by fstat
+        let fd = open64(c"/proc/self/exe".as_ptr(), 0, 0);
+        let end = lseek64(fd, 0, 2);
+        let mut st = [0u64; 18];
+        let r = fstat64(fd, &mut st);
+        // st_size: offset 48 on both architectures
+        println!("lfs64 {} {r} {}", fd >= 0, end as u64 == st[6] && end > 0);
+        close(fd);
         *__errno_location() = 2;
         perror(c"perror".as_ptr());
     }

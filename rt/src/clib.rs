@@ -1162,6 +1162,74 @@ fn to_statvfs(k: &KStatfs, out: *mut statvfs) {
     unsafe { out.write(v) };
 }
 
+// ---- the LFS names (`open64`, ...): the same functions on 64-bit Linux.
+// Older libc crates, and C built with _FILE_OFFSET_BITS=64, call them. ----
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn open64(path: *const c_char, flags: c_int, mode: c_uint) -> c_int {
+    unsafe { open(path, flags, mode) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openat64(dirfd: c_int, path: *const c_char, flags: c_int, mode: c_uint) -> c_int {
+    unsafe { openat(dirfd, path, flags, mode) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lseek64(fd: c_int, off: i64, whence: c_int) -> i64 {
+    lseek(fd, off, whence)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pread64(fd: c_int, buf: *mut c_void, n: size_t, off: i64) -> ssize_t {
+    unsafe { pread(fd, buf, n, off) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pwrite64(fd: c_int, buf: *const c_void, n: size_t, off: i64) -> ssize_t {
+    unsafe { pwrite(fd, buf, n, off) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fstatat64(dirfd: c_int, path: *const c_char, st: *mut c_void, flags: c_int) -> c_int {
+    unsafe { fstatat(dirfd, path, st, flags) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stat64(path: *const c_char, st: *mut c_void) -> c_int {
+    unsafe { stat(path, st) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lstat64(path: *const c_char, st: *mut c_void) -> c_int {
+    unsafe { lstat(path, st) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fstat64(fd: c_int, st: *mut c_void) -> c_int {
+    unsafe { fstat(fd, st) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mmap64(addr: *mut c_void, len: size_t, prot: c_int, flags: c_int, fd: c_int, off: i64) -> *mut c_void {
+    unsafe { mmap(addr, len, prot, flags, fd, off) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn readdir64(d: *mut DIR) -> *mut c_void {
+    unsafe { readdir(d) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getrlimit64(resource: c_int, rlim: *mut [u64; 2]) -> c_int {
+    unsafe { getrlimit(resource, rlim) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setrlimit64(resource: c_int, rlim: *const [u64; 2]) -> c_int {
+    unsafe { setrlimit(resource, rlim) }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn statvfs(path: *const c_char, out: *mut statvfs) -> c_int {
     let mut k = unsafe { core::mem::zeroed::<KStatfs>() };

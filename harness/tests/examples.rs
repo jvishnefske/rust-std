@@ -269,6 +269,7 @@ fn check_clib_more(e: &Env) {
         r#"files mkdir 0 rename 0 link 0 readlink 1 realpath true mkfifo 0 readdir [".", "..", "b", "c", "f", "l"] rmdir 0 missing -1 errno 2"#,
         "session getsid true getpgid true ttyname_r 9 tcgetpgrp -1 errno 9\n",
         "cfmakeraw iflag 0x0 lflag 0x0 cflag 0x30\n",
+        "lfs64 true 0 true\n",
         "select 0 1 time true\n",
         "getgrouplist first 12345 n true short -1 true\n",
         "langinfo UTF-8 Wednesday Dec %a %b %e %H:%M:%S %Y\n",

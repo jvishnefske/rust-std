@@ -30,6 +30,7 @@ const EXAMPLES: &[&str] = &[
     "clib",
     "clib-more",
     "sandbox",
+    "fortify",
 ];
 
 struct Env {
@@ -622,6 +623,27 @@ fn check_all(e: &Env, tag: &str) {
     check_clib(e);
     check_clib_more(e);
     check_sandbox(e);
+    check_fortify(e);
+}
+
+/// The stack canary (in the TCB of every thread on x86_64) and the
+/// `_FORTIFY_SOURCE` functions: in bounds they work, out of bounds they
+/// abort with glibc's message.
+fn check_fortify(e: &Env) {
+    const SIGABRT: i32 = 6;
+    let r = e.run("fortify", &[], b"", &[]);
+    assert_eq!(r.code(), Some(0), "{}", r.stderr());
+    assert_eq!(
+        r.stdout(),
+        "guard_set true\ntcb_main true\ntcb_thread true\nmemcpy 0123456789abcdef\nstrcat hello, world\n\
+         snprintf 11 42-abcd\nsprintf 4 beef\nfdelt 0 15\n"
+    );
+    for how in ["memcpy", "sprintf", "fdelt"] {
+        let r = e.run("fortify", &[how], b"", &[]);
+        assert_eq!(r.output.status.signal(), Some(SIGABRT), "{how}: {:?}", r.output.status);
+        // (qemu adds a line of its own)
+        assert!(r.stderr().starts_with("*** buffer overflow detected ***: terminated\n"), "{how}: {}", r.stderr());
+    }
 }
 
 /// Without `LINUX_NONE_SECCOMP` there is no filter (tests/seccomp.rs has

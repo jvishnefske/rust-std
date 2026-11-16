@@ -18,9 +18,12 @@
 
 #![allow(non_camel_case_types)]
 
+mod fortify;
 mod pthread;
 mod stdio;
 mod string;
+
+pub(crate) use fortify::{init_stack_guard, stack_guard};
 
 use string::strcpy;
 

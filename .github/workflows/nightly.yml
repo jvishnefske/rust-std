@@ -1,0 +1,70 @@
+name: Latest nightly
+
+# Weekly: does std-patches/ still apply to the latest nightly's rust-src,
+# and do the examples still build and run on it? When not, this opens an
+# issue (or comments on the open one). Moving the pin in
+# rust-toolchain.toml stays a manual change.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+defaults:
+  run:
+    # -eo pipefail: a failure before `tee` fails the step
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  # overrides rust-toolchain.toml, here and in apps/
+  RUSTUP_TOOLCHAIN: nightly
+
+jobs:
+  latest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the latest nightly
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src
+          rustc --version | tee nightly-version
+
+      - name: Apply std-patches/
+        run: cargo xtask sysroot --no-toolchain 2>&1 | tee step.log
+
+      - name: Build and run the examples
+        working-directory: apps
+        run: |
+          export __CARGO_TESTS_ONLY_SRC_ROOT=$PWD/../target/linux-none/std-src/library
+          cargo build -p examples -Zbuild-std=std,panic_abort 2>&1 | tee ../step.log
+          for p in hello threads collections; do
+            ./target/x86_64-unknown-linux-none/debug/$p 2>&1 | tee -a ../step.log
+          done
+
+      - name: Report
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "With \`$(cat nightly-version)\`, the step after the last that passed failed:"
+            echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo '```'
+            tail -n 60 step.log 2>/dev/null
+            echo '```'
+          } > body.md
+          gh label create nightly-break --force --color d93f0b --description "std-patches vs. the latest nightly"
+          open=$(gh issue list --label nightly-break --state open --json number --jq '.[0].number')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body-file body.md
+          else
+            gh issue create --title "std-patches no longer build on the latest nightly" --label nightly-break --body-file body.md
+          fi

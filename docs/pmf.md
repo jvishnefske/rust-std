@@ -51,6 +51,12 @@ What's left is the smaller group who care that there is no C at all:
    services, not for existing ones.
 4. **No proof of benefit.** There are no published numbers against musl:
    binary size, startup time, allocator throughput, syscall count.
+   *(2026-11-16: linux-none-pkgs' `bench/` now has them. Startup is 2–3×
+   faster than musl or glibc builds, and the distinct syscall set is the
+   smallest. Throughput beats musl and matches glibc, except the web
+   server, which serves ~25% fewer requests/s than glibc. Getting there
+   took per-thread allocator caches: rt's single heap lock had made
+   parallel tools 3–6× slower. Size is a wash.)*
 
 ## Options
 

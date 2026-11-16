@@ -7,6 +7,12 @@ resolver = "3"
 [profile.dev]
 panic = "abort"
 
+# memcpy, memset and memcmp come from compiler_builtins; unoptimized they
+# are byte loops, which made the fuzzer's `alloc` target ~10x slower. (cargo
+# warns that the spec matches no packages, but -Zbuild-std units use it.)
+[profile.dev.package.compiler_builtins]
+opt-level = 3
+
 [profile.release]
 panic = "abort"
 

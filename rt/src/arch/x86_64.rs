@@ -93,6 +93,7 @@ pub mod nr {
     pub const SPLICE: usize = 275;
     pub const UNAME: usize = 63;
     pub const PRCTL: usize = 157;
+    pub const SECCOMP: usize = 317;
     pub const PRLIMIT64: usize = 302;
     pub const SIGALTSTACK: usize = 131;
     pub const MADVISE: usize = 28;

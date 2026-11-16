@@ -164,7 +164,7 @@ fn sources_stamp() -> String {
         repo().join("rt"),
     ] {
         if p.ends_with("rt") {
-            for f in ["Cargo.toml", "build.rs", "src"] {
+            for f in ["Cargo.toml", "build.rs", "src", "syscalls"] {
                 walk(&p.join(f), &mut h);
             }
         } else {
@@ -195,13 +195,18 @@ pub fn apps_cargo(arch: Arch, args: &[&str]) -> Command {
 /// for it, but cargo never passes that flag (it takes unwind to be every
 /// target's default), so for unwinding it goes in the rustflags.
 pub fn apps_cargo_with(arch: Arch, panic: Panic, args: &[&str]) -> Command {
+    apps_cargo_in(arch, panic, panic.target_dir(), args)
+}
+
+/// [`apps_cargo_with`], building in `target_dir` (relative to `apps/`).
+fn apps_cargo_in(arch: Arch, panic: Panic, target_dir: &str, args: &[&str]) -> Command {
     let stamp = prepare();
     let mut cmd = pinned_cargo();
     cmd.args(args)
         .current_dir(apps())
         .env("__CARGO_TESTS_ONLY_SRC_ROOT", xtask::library_dir())
         .args(["--target", &arch.target_arg()])
-        .args(["--target-dir", panic.target_dir()]);
+        .args(["--target-dir", target_dir]);
     let panic_flag = match panic {
         Panic::Abort => {
             cmd.arg("-Zbuild-std=std,panic_abort,test");
@@ -214,10 +219,11 @@ pub fn apps_cargo_with(arch: Arch, panic: Panic, args: &[&str]) -> Command {
             "\"-Cpanic=unwind\", "
         }
     };
-    cmd.arg("--config").arg(format!(
-        "target.{}.rustflags=[{panic_flag}\"--cfg=linux_none_src=\\\"{stamp}\\\"\", \"--check-cfg=cfg(linux_none_src, values(any()))\"]",
-        arch.name()
-    ));
+    let stamp_flags = format!("\"--cfg=linux_none_src=\\\"{stamp}\\\"\", \"--check-cfg=cfg(linux_none_src, values(any()))\"");
+    cmd.arg("--config").arg(format!("target.{}.rustflags=[{panic_flag}{stamp_flags}]", arch.name()));
+    // and in the host's, for rt's build script: cargo does not notice edits
+    // to it either, and keeps running the old one
+    cmd.args(["-Zhost-config", "-Ztarget-applies-to-host"]).arg("--config").arg(format!("host.rustflags=[{stamp_flags}]"));
     // natively, replace apps/'s qemu runner with `env`, which just runs the
     // program (cargo rejects an empty runner)
     let runner = match arch.runner() {
@@ -248,6 +254,26 @@ fn build(arch: Arch, panic: Panic, args: &[&str]) -> PathBuf {
 pub fn examples_dir(arch: Arch, panic: Panic) -> PathBuf {
     static DIRS: [[OnceLock<PathBuf>; 2]; 2] = [const { [const { OnceLock::new() }; 2] }; 2];
     DIRS[arch as usize][panic as usize].get_or_init(|| build(arch, panic, &["-p", "examples"])).clone()
+}
+
+/// Build example `name` for `arch` with rt's seccomp filter compiled from
+/// `allowlist` (`LINUX_NONE_SECCOMP`, see rt/src/seccomp.rs) and return
+/// the binary. The allowlist is part of std's build, so each one gets its
+/// own target directory, named by a hash of its contents.
+pub fn seccomp_example(arch: Arch, name: &str, allowlist: &Path) -> PathBuf {
+    let text = std::fs::read(allowlist).unwrap();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in &text {
+        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+    }
+    let dir = format!("target/seccomp/{h:016x}");
+    let _g = BUILD.lock().unwrap_or_else(|e| e.into_inner());
+    let status = apps_cargo_in(arch, Panic::Abort, &dir, &["build", "-p", "examples", "--bin", name])
+        .env("LINUX_NONE_SECCOMP", allowlist)
+        .status()
+        .expect("failed to run cargo");
+    assert!(status.success(), "cargo build --bin {name} with {} failed for {arch:?}", allowlist.display());
+    apps().join(dir).join(arch.name()).join("debug").join(name)
 }
 
 /// Build the `fuzzee` binary (the linux-none side of the fuzzer) for `arch`.

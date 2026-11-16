@@ -36,7 +36,7 @@
         name = "linux-none-std-src";
         src = fs.toSource {
           root = ./.;
-          fileset = fs.unions [ ./xtask ./std-patches ./rt/Cargo.toml ./rt/build.rs ./rt/src ];
+          fileset = fs.unions [ ./xtask ./std-patches ./rt/Cargo.toml ./rt/build.rs ./rt/src ./rt/syscalls ];
         };
         nativeBuildInputs = [ toolchain pkgs.git ];
         dontFixup = true;

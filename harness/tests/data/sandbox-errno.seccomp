@@ -1,0 +1,5 @@
+# rt's seccomp allowlist for apps/examples/src/bin/sandbox.rs (see
+# harness/tests/seccomp.rs): what `cargo xtask syscalls` traced, less
+# openat. (arch_prctl and execve happen before the filter is installed.)
+action: errno
+close fcntl mmap mprotect munmap rt_sigaction rt_sigprocmask sigaltstack write

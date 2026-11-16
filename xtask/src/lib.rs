@@ -20,6 +20,9 @@
 //! `cargo xtask musl-cfg DIR` applies its cfg part to any crate (`nix`,
 //! `socket2`, ...) that picks libc's musl definitions by `target_env`.
 //!
+//! `cargo xtask syscalls -- PROGRAM ...` lists the syscalls a run makes, as
+//! a seccomp allowlist (see [`syscalls`]).
+//!
 //! `cargo xtask export-patches` writes the commits on top of `base` back to
 //! `std-patches/`, so the patched tree can be edited in place.
 
@@ -27,6 +30,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs, io};
+
+pub mod syscalls;
 
 const TOOLCHAIN: &str = "linux-none";
 
@@ -153,7 +158,9 @@ pub fn sysroot(opts: &Options) -> io::Result<()> {
     let rt = src.join("library/linux_none_rt");
     if opts.out.is_some() {
         fs::create_dir_all(rt.join("src"))?;
+        fs::create_dir_all(rt.join("syscalls"))?;
         copy_tree(&repo().join("rt/src"), &rt.join("src"), false)?;
+        copy_tree(&repo().join("rt/syscalls"), &rt.join("syscalls"), false)?;
         for f in ["Cargo.toml", "build.rs"] {
             fs::copy(repo().join("rt").join(f), rt.join(f))?;
         }

@@ -19,10 +19,11 @@ fn main() {
         Some("libc-fixup") if args.len() == 2 => libc_as_musl(&PathBuf::from(&args[1])),
         Some("musl-cfg") if args.len() == 2 => musl_cfg(&PathBuf::from(&args[1])),
         Some("export-patches") => export_patches(),
-        _ => {
-            eprintln!("usage: cargo xtask sysroot [--force] [--out DIR] [--no-toolchain] | libc-fixup DIR | musl-cfg DIR | export-patches");
-            exit(2)
-        }
+        Some("syscalls") => match xtask::syscalls::options(&args[1..]) {
+            Some(o) => xtask::syscalls::syscalls(&o),
+            None => usage(),
+        },
+        _ => usage(),
     };
     if let Err(e) = r {
         eprintln!("xtask: {e}");
@@ -30,3 +31,11 @@ fn main() {
     }
 }
 
+
+fn usage() -> ! {
+    eprintln!(
+        "usage: cargo xtask sysroot [--force] [--out DIR] [--no-toolchain] | libc-fixup DIR | musl-cfg DIR | export-patches\n       \
+         cargo xtask syscalls [--docker FILE] [--systemd FILE] -- PROGRAM [ARGS...]"
+    );
+    exit(2)
+}

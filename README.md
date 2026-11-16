@@ -145,6 +145,31 @@ build with the pinned nightly and
 harness also passes a hash of the sources in `--cfg linux_none_src=...`, so
 that its builds are rebuilt.
 
+### Sandboxing with seccomp
+
+Every syscall a linux-none program makes goes through `rt` (no libc
+underneath), so a trace of it is the whole syscall surface.
+`cargo xtask syscalls` runs a program under strace and prints the distinct
+syscalls, which is an allowlist; it can also write a Docker/OCI profile and
+a systemd `SystemCallFilter=` line:
+
+```console
+$ cargo xtask syscalls --docker rg.json --systemd rg.conf -- rg -n TODO src > rg.seccomp
+$ docker run --security-opt seccomp=rg.json ...      # also allows what runc needs
+```
+
+Build with `LINUX_NONE_SECCOMP=/abs/path/rg.seccomp` and `_start` installs
+that allowlist as a seccomp filter itself, before `main` (with
+`PR_SET_NO_NEW_PRIVS`): the program sandboxes itself wherever it runs. The
+file is syscall names separated by whitespace or commas, `#` comments, and
+an optional `action: kill | trap | log | errno [N]` for everything else
+(default `kill`, like systemd; `errno` alone is EPERM). `exit`,
+`exit_group`, `rt_sigreturn` and `restart_syscall` are always allowed. The
+filter is inherited by threads, children and across `execve`. Cargo
+rebuilds std when the variable or the file changes. A trace covers only what
+the run exercised, so trace the real workload (`harness/tests/seccomp.rs`
+checks both actions).
+
 ## What differs from std on linux-gnu
 
 - **Panics abort by default**: unwinding needs `-Cpanic=unwind` (above).
@@ -251,6 +276,11 @@ patched sources if needed, then for x86_64 and for aarch64:
   server on 127.0.0.1 (CNAME chains, TCP fallback, forged replies,
   timeouts, search domains). The `resolve` example checks lookups through
   std with the host's `/etc/resolv.conf`, if the host can resolve names.
+- **seccomp**: `tests/seccomp.rs` builds the `sandbox` example with an
+  allowlist that leaves out `openat` (`LINUX_NONE_SECCOMP`), once with
+  `action: errno` (the open fails with EPERM) and once with `action: kill`
+  (the process dies of SIGSYS). It runs natively only: qemu-user does not
+  emulate seccomp for its guest.
 - **Differential fuzzing**: `apps/fuzzee/ops.rs` runs both in-process
   against the host's std and in the `fuzzee` binary against linux-none's
   std, and the transcripts must match (`FUZZ_SEED`, `FUZZ_ITERS`,

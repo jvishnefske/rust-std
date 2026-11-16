@@ -18,6 +18,7 @@
 //! - [`errno`]: the thread's `errno`.
 //! - [`vdso`]: finding `clock_gettime` in the kernel's vDSO.
 //! - [`passwd`]: home directories from `/etc/passwd`.
+//! - [`seccomp`]: the opt-in seccomp filter `_start` installs before `main`.
 //! - [`clib`]: the C library functions crates call through the `libc`
 //!   crate (`isatty`, `mmap`, `sysconf`, `sigaction`, `getpwuid_r`, ...).
 //!
@@ -52,6 +53,7 @@ pub mod futex;
 pub mod locks;
 pub mod passwd;
 pub mod process;
+pub mod seccomp;
 pub mod signal;
 pub mod start;
 pub mod sys;

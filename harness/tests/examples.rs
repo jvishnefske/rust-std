@@ -29,6 +29,7 @@ const EXAMPLES: &[&str] = &[
     "unwind",
     "clib",
     "clib-more",
+    "sandbox",
 ];
 
 struct Env {
@@ -620,6 +621,15 @@ fn check_all(e: &Env, tag: &str) {
     check_unwind(e);
     check_clib(e);
     check_clib_more(e);
+    check_sandbox(e);
+}
+
+/// Without `LINUX_NONE_SECCOMP` there is no filter (tests/seccomp.rs has
+/// the builds with one).
+fn check_sandbox(e: &Env) {
+    let r = e.run("sandbox", &[], b"", &[]);
+    assert_eq!(r.code(), Some(0));
+    assert_eq!(r.stdout(), "before open\nopen: ok\n");
 }
 
 fn check_smoke(e: &Env) {

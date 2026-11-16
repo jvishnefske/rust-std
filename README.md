@@ -229,8 +229,8 @@ Gaps in what is here:
 - **C code** in crates can only call what `rt/src/clib.rs` provides
   (with the stack protector and `_FORTIFY_SOURCE`'s `__*_chk` functions),
   which is not enough of a C library for OpenSSL (`openssl-src`).
-  linux-none-pkgs builds 40 of its 42 packages for this reason and others
-  (see its README).
+  linux-none-pkgs builds 41 of its 42 packages; the one left, gitui,
+  builds OpenSSL (see its README).
 
 Ideas, roughly in order of value:
 

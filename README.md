@@ -176,13 +176,15 @@ checks both actions).
   The unwinder only knows the executable's own unwind tables (there are no
   shared objects), and does not unwind through signal frames.
 - **Name lookup** reads `/etc/hosts`, then asks the DNS servers in
-  `/etc/resolv.conf` (A and AAAA, TCP for truncated answers): there is no
-  NSS, so no mDNS, `systemd-resolved` varlink or LDAP. Of `options`, only
-  `timeout`, `attempts` and `ndots` count, and `LOCALDOMAIN` and
-  `RES_OPTIONS` are ignored. There is no EDNS0 (UDP answers stop at 512
-  bytes), a CNAME whose target is not in the answer is not followed up,
-  nameserver scopes must be numeric (`fe80::1%2`), and IPv4 addresses come
-  first rather than in RFC 6724 order.
+  `/etc/resolv.conf` (A and AAAA with EDNS0's 1232-byte UDP payload, TCP
+  for truncated answers): there is no NSS, so no mDNS, `systemd-resolved`
+  varlink or LDAP. Of `options`, only `timeout`, `attempts` and `ndots`
+  count, and `LOCALDOMAIN` and `RES_OPTIONS` are ignored. A CNAME whose
+  target is not in the answer is not followed up, and nameserver scopes
+  must be numeric (`fe80::1%2`). DNS answers are sorted by RFC 6724's
+  rules, except those needing interface details the kernel's source
+  address choice does not give (deprecated and home addresses, native
+  transport); `/etc/hosts` answers keep the file's order.
 - **`env::home_dir`** without `$HOME` reads `/etc/passwd` only (no NSS).
 - **`os::unix::thread::JoinHandleExt`** hands out the address of the
   runtime's control block for the thread as its `pthread_t` (there are no
@@ -195,12 +197,11 @@ Gaps in what is here:
 
 - **Unwinding** stops at signal frames and knows no shared objects
   (there are none to load: there is no `dlopen`).
-- **DNS**: no EDNS0, no follow-up query for a CNAME whose target is
-  missing from the answer, no RFC 6724 address ordering, and no
-  `LOCALDOMAIN`/`RES_OPTIONS`.
-- **C code** in crates can only call what `rt/src/clib.rs` provides.
-  There is no `__stack_chk_fail` or `_FORTIFY_SOURCE` `__*_chk`
-  functions, and not enough of a C library for OpenSSL (`openssl-src`).
+- **DNS**: no follow-up query for a CNAME whose target is missing from
+  the answer, and no `LOCALDOMAIN`/`RES_OPTIONS`.
+- **C code** in crates can only call what `rt/src/clib.rs` provides
+  (with the stack protector and `_FORTIFY_SOURCE`'s `__*_chk` functions),
+  which is not enough of a C library for OpenSSL (`openssl-src`).
   linux-none-pkgs builds 40 of its 42 packages for this reason and others
   (see its README).
 
@@ -218,11 +219,8 @@ Ideas, roughly in order of value:
     `targets/*.json`;
   - `std: true` for the targets, and CI for them in `x.py`;
   - a compiler-team proposal first, and a rebase onto rust's master.
-- **Stack protector and fortify** functions in rt, so C code can keep
-  Nix's hardening flags.
 - **More of clib**, driven by which crates fail to link (`nix build
   .#candidates.<name>` in linux-none-pkgs).
-- **EDNS0 and RFC 6724** ordering in the resolver.
 - **A riscv64 target**: rt's syscall and `_start` code is per
   architecture, and the rest is shared.
 
@@ -273,8 +271,9 @@ patched sources if needed, then for x86_64 and for aarch64:
   socket `timeouts` tests are skipped too (they pass under qemu 10). These
   builds add a few minutes; `SKIP_STD_UNITTESTS=1` leaves them out.
 - **DNS**: `tests/dns.rs` runs `rt`'s resolver on the host against a fake
-  server on 127.0.0.1 (CNAME chains, TCP fallback, forged replies,
-  timeouts, search domains). The `resolve` example checks lookups through
+  server on 127.0.0.1 (CNAME chains, EDNS0 and the FORMERR fallback, TCP
+  fallback, forged replies, timeouts, search domains), and its RFC 6724
+  sort with given source addresses, rule by rule. The `resolve` example checks lookups through
   std with the host's `/etc/resolv.conf`, if the host can resolve names.
 - **seccomp**: `tests/seccomp.rs` builds the `sandbox` example with an
   allowlist that leaves out `openat` (`LINUX_NONE_SECCOMP`), once with
